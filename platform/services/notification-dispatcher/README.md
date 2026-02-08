@@ -15,6 +15,7 @@ Implemented stream behavior:
 4. Sends transient failures to retry stream with incremented `retry_count`
 5. Sends exhausted retries to DLQ stream and ACKs original message
 6. Persists state transitions through `notification-storage` internal API
+7. Pushes successful delivery events to `notification-gateway` internal fan-out endpoint
 
 Environment variables:
 
@@ -29,6 +30,8 @@ Environment variables:
 9. `DISPATCHER_MAX_RETRIES` (default: `3`)
 10. `STORAGE_HOST` (default: `127.0.0.1`)
 11. `STORAGE_PORT` (default: `8090`)
+12. `GATEWAY_HOST` (default: `127.0.0.1`)
+13. `GATEWAY_PORT` (default: `8080`)
 
 Testing note:
 

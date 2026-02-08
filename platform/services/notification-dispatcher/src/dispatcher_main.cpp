@@ -376,14 +376,34 @@ bool PersistToStorage(const std::string& storage_host, int storage_port,
   return status_code >= 200 && status_code < 300;
 }
 
+bool PushToGatewayFeed(const std::string& gateway_host, int gateway_port,
+                       const std::string& notification_id,
+                       const std::unordered_map<std::string, std::string>& fields) {
+  std::ostringstream body;
+  body << "{";
+  body << "\"notification_id\":\"" << JsonEscape(notification_id) << "\",";
+  body << "\"tenant_id\":\"" << JsonEscape(GetField(fields, "tenant_id", "unknown")) << "\",";
+  body << "\"user_id\":\"" << JsonEscape(GetField(fields, "user_id", "unknown")) << "\",";
+  body << "\"channel\":\"" << JsonEscape(GetField(fields, "channel", "default")) << "\",";
+  body << "\"content\":\"" << JsonEscape(GetField(fields, "content", "")) << "\"";
+  body << "}";
+
+  int status_code = 0;
+  if (!HttpPostJson(gateway_host, gateway_port, "/v1/internal/deliver", body.str(), status_code)) {
+    return false;
+  }
+  return status_code >= 200 && status_code < 300;
+}
+
 }  // namespace
 
 int main() {
   const auto redis_port_opt = ParseIntEnv("REDIS_PORT", 6379);
   const auto storage_port_opt = ParseIntEnv("STORAGE_PORT", 8090);
+  const auto gateway_port_opt = ParseIntEnv("GATEWAY_PORT", 8080);
   const auto block_ms_opt = ParseIntEnv("DISPATCHER_BLOCK_MS", 5000);
   const auto max_retries_opt = ParseIntEnv("DISPATCHER_MAX_RETRIES", 3);
-  if (!redis_port_opt.has_value() || !storage_port_opt.has_value() ||
+  if (!redis_port_opt.has_value() || !storage_port_opt.has_value() || !gateway_port_opt.has_value() ||
       !block_ms_opt.has_value() || !max_retries_opt.has_value()) {
     std::cerr << "invalid numeric env config\n";
     return 1;
@@ -391,8 +411,10 @@ int main() {
 
   const std::string redis_host = std::getenv("REDIS_HOST") ? std::getenv("REDIS_HOST") : "127.0.0.1";
   const std::string storage_host = std::getenv("STORAGE_HOST") ? std::getenv("STORAGE_HOST") : "127.0.0.1";
+  const std::string gateway_host = std::getenv("GATEWAY_HOST") ? std::getenv("GATEWAY_HOST") : "127.0.0.1";
   const int redis_port = redis_port_opt.value();
   const int storage_port = storage_port_opt.value();
+  const int gateway_port = gateway_port_opt.value();
 
   const std::string stream = std::getenv("REDIS_STREAM_NAME")
                                  ? std::getenv("REDIS_STREAM_NAME")
@@ -426,7 +448,7 @@ int main() {
 
   std::cout << "notification-dispatcher consuming stream=" << stream << " group=" << group
             << " consumer=" << consumer << " storage=" << storage_host << ":" << storage_port
-            << "\n";
+            << " gateway=" << gateway_host << ":" << gateway_port << "\n";
 
   while (true) {
     RespValue reply;
@@ -488,6 +510,13 @@ int main() {
                                 retry_count, "")) {
             should_fail = true;
             failure_reason = "storage_persist_failed_delivered";
+          }
+        }
+
+        if (!should_fail) {
+          if (!PushToGatewayFeed(gateway_host, gateway_port, message_id, fields)) {
+            should_fail = true;
+            failure_reason = "gateway_delivery_failed";
           }
         }
 

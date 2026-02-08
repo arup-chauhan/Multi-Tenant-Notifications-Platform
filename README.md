@@ -318,7 +318,7 @@ k6 run platform/tests/load/k6/reconnect_storm.ts
 k6 run platform/tests/load/k6/slow_consumer.ts
 ```
 
-Note: WebSocket suites require the `/ws` endpoint to be active in the running gateway build.
+WebSocket suites target the gateway `/ws` endpoint for realtime fan-out validation.
 
 Save result artifacts:
 

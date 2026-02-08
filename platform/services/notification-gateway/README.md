@@ -11,6 +11,8 @@ Implemented ingress endpoints:
 
 1. `POST /v1/notifications`
 2. `GET /health`
+3. `GET /ws` (WebSocket realtime feed)
+4. `POST /v1/internal/deliver` (internal dispatcher -> websocket fan-out path)
 
 Environment variables:
 

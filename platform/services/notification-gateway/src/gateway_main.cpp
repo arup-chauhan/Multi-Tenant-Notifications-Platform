@@ -1,19 +1,25 @@
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -24,6 +30,13 @@ struct HttpRequest {
   std::unordered_map<std::string, std::string> headers;
   std::string body;
 };
+
+struct WebSocketClient {
+  int fd = -1;
+};
+
+std::mutex g_ws_clients_mu;
+std::vector<std::shared_ptr<WebSocketClient>> g_ws_clients;
 
 std::string ToLower(std::string input) {
   std::transform(input.begin(), input.end(), input.begin(),
@@ -41,6 +54,14 @@ std::string Trim(const std::string& input) {
     --end;
   }
   return input.substr(start, end - start);
+}
+
+std::string StripQuery(const std::string& path) {
+  size_t q = path.find('?');
+  if (q == std::string::npos) {
+    return path;
+  }
+  return path.substr(0, q);
 }
 
 std::optional<int> ParseIntEnv(const char* key, int fallback) {
@@ -274,6 +295,32 @@ void WriteHttpResponse(int client_fd, int status, const std::string& status_text
   SendAll(client_fd, response.str());
 }
 
+int ConnectTcp(const std::string& host, int port) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  addrinfo* result = nullptr;
+  if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &result) != 0) {
+    return -1;
+  }
+
+  int fd = -1;
+  for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+    fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    if (fd < 0) {
+      continue;
+    }
+    if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+      break;
+    }
+    close(fd);
+    fd = -1;
+  }
+  freeaddrinfo(result);
+  return fd;
+}
+
 std::string RedisRespArray(const std::vector<std::string>& args) {
   std::ostringstream oss;
   oss << "*" << args.size() << "\r\n";
@@ -338,20 +385,8 @@ bool ReadRedisSimpleReply(int fd, std::string& out_reply) {
 bool PublishToRedisStream(const std::string& host, int port, const std::string& stream_name,
                           const std::unordered_map<std::string, std::string>& fields,
                           std::string& reply) {
-  int redis_fd = socket(AF_INET, SOCK_STREAM, 0);
+  int redis_fd = ConnectTcp(host, port);
   if (redis_fd < 0) {
-    return false;
-  }
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(static_cast<uint16_t>(port));
-  if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
-    close(redis_fd);
-    return false;
-  }
-  if (connect(redis_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-    close(redis_fd);
     return false;
   }
 
@@ -365,6 +400,262 @@ bool PublishToRedisStream(const std::string& host, int port, const std::string& 
   bool ok = SendAll(redis_fd, payload) && ReadRedisSimpleReply(redis_fd, reply);
   close(redis_fd);
   return ok;
+}
+
+// SHA1 and base64 are used to complete RFC6455 websocket handshake.
+std::array<uint8_t, 20> Sha1(const std::string& input) {
+  uint64_t ml = static_cast<uint64_t>(input.size()) * 8;
+  std::vector<uint8_t> data(input.begin(), input.end());
+  data.push_back(0x80);
+  while ((data.size() % 64) != 56) {
+    data.push_back(0x00);
+  }
+  for (int i = 7; i >= 0; --i) {
+    data.push_back(static_cast<uint8_t>((ml >> (i * 8)) & 0xFF));
+  }
+
+  uint32_t h0 = 0x67452301;
+  uint32_t h1 = 0xEFCDAB89;
+  uint32_t h2 = 0x98BADCFE;
+  uint32_t h3 = 0x10325476;
+  uint32_t h4 = 0xC3D2E1F0;
+
+  auto rol = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
+
+  for (size_t chunk = 0; chunk < data.size(); chunk += 64) {
+    uint32_t w[80] = {0};
+    for (int i = 0; i < 16; ++i) {
+      size_t j = chunk + i * 4;
+      w[i] = (static_cast<uint32_t>(data[j]) << 24) |
+             (static_cast<uint32_t>(data[j + 1]) << 16) |
+             (static_cast<uint32_t>(data[j + 2]) << 8) |
+             (static_cast<uint32_t>(data[j + 3]));
+    }
+    for (int i = 16; i < 80; ++i) {
+      w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    }
+
+    uint32_t a = h0, b = h1, c = h2, d = h3, e = h4;
+    for (int i = 0; i < 80; ++i) {
+      uint32_t f = 0;
+      uint32_t k = 0;
+      if (i < 20) {
+        f = (b & c) | ((~b) & d);
+        k = 0x5A827999;
+      } else if (i < 40) {
+        f = b ^ c ^ d;
+        k = 0x6ED9EBA1;
+      } else if (i < 60) {
+        f = (b & c) | (b & d) | (c & d);
+        k = 0x8F1BBCDC;
+      } else {
+        f = b ^ c ^ d;
+        k = 0xCA62C1D6;
+      }
+      uint32_t temp = rol(a, 5) + f + e + k + w[i];
+      e = d;
+      d = c;
+      c = rol(b, 30);
+      b = a;
+      a = temp;
+    }
+
+    h0 += a;
+    h1 += b;
+    h2 += c;
+    h3 += d;
+    h4 += e;
+  }
+
+  std::array<uint8_t, 20> out{};
+  auto write_word = [&](uint32_t word, int offset) {
+    out[offset] = static_cast<uint8_t>((word >> 24) & 0xFF);
+    out[offset + 1] = static_cast<uint8_t>((word >> 16) & 0xFF);
+    out[offset + 2] = static_cast<uint8_t>((word >> 8) & 0xFF);
+    out[offset + 3] = static_cast<uint8_t>(word & 0xFF);
+  };
+  write_word(h0, 0);
+  write_word(h1, 4);
+  write_word(h2, 8);
+  write_word(h3, 12);
+  write_word(h4, 16);
+  return out;
+}
+
+std::string Base64Encode(const uint8_t* data, size_t len) {
+  static const char table[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve(((len + 2) / 3) * 4);
+  for (size_t i = 0; i < len; i += 3) {
+    uint32_t n = static_cast<uint32_t>(data[i]) << 16;
+    bool have2 = i + 1 < len;
+    bool have3 = i + 2 < len;
+    if (have2) n |= static_cast<uint32_t>(data[i + 1]) << 8;
+    if (have3) n |= static_cast<uint32_t>(data[i + 2]);
+
+    out.push_back(table[(n >> 18) & 0x3F]);
+    out.push_back(table[(n >> 12) & 0x3F]);
+    out.push_back(have2 ? table[(n >> 6) & 0x3F] : '=');
+    out.push_back(have3 ? table[n & 0x3F] : '=');
+  }
+  return out;
+}
+
+bool SendWebSocketFrame(int fd, uint8_t opcode, const std::string& payload) {
+  std::string frame;
+  frame.push_back(static_cast<char>(0x80 | (opcode & 0x0F)));
+
+  const uint64_t len = payload.size();
+  if (len <= 125) {
+    frame.push_back(static_cast<char>(len));
+  } else if (len <= 0xFFFF) {
+    frame.push_back(static_cast<char>(126));
+    frame.push_back(static_cast<char>((len >> 8) & 0xFF));
+    frame.push_back(static_cast<char>(len & 0xFF));
+  } else {
+    frame.push_back(static_cast<char>(127));
+    for (int i = 7; i >= 0; --i) {
+      frame.push_back(static_cast<char>((len >> (i * 8)) & 0xFF));
+    }
+  }
+  frame += payload;
+  return SendAll(fd, frame);
+}
+
+bool ReadWebSocketFrame(int fd, uint8_t& opcode, std::string& payload) {
+  std::string head;
+  if (!ReadExact(fd, head, 2)) {
+    return false;
+  }
+
+  opcode = static_cast<uint8_t>(head[0]) & 0x0F;
+  bool masked = (static_cast<uint8_t>(head[1]) & 0x80) != 0;
+  uint64_t len = static_cast<uint8_t>(head[1]) & 0x7F;
+
+  if (len == 126) {
+    std::string ext;
+    if (!ReadExact(fd, ext, 2)) {
+      return false;
+    }
+    len = (static_cast<uint8_t>(ext[0]) << 8) | static_cast<uint8_t>(ext[1]);
+  } else if (len == 127) {
+    std::string ext;
+    if (!ReadExact(fd, ext, 8)) {
+      return false;
+    }
+    len = 0;
+    for (int i = 0; i < 8; ++i) {
+      len = (len << 8) | static_cast<uint8_t>(ext[i]);
+    }
+  }
+
+  if (len > 1024 * 1024) {
+    return false;
+  }
+
+  std::array<uint8_t, 4> mask = {0, 0, 0, 0};
+  if (masked) {
+    std::string mask_bytes;
+    if (!ReadExact(fd, mask_bytes, 4)) {
+      return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+      mask[i] = static_cast<uint8_t>(mask_bytes[i]);
+    }
+  }
+
+  if (!ReadExact(fd, payload, static_cast<size_t>(len))) {
+    return false;
+  }
+
+  if (masked) {
+    for (size_t i = 0; i < payload.size(); ++i) {
+      payload[i] = static_cast<char>(static_cast<uint8_t>(payload[i]) ^ mask[i % 4]);
+    }
+  }
+  return true;
+}
+
+std::shared_ptr<WebSocketClient> AddWebSocketClient(int fd) {
+  auto client = std::make_shared<WebSocketClient>();
+  client->fd = fd;
+  std::lock_guard<std::mutex> lock(g_ws_clients_mu);
+  g_ws_clients.push_back(client);
+  return client;
+}
+
+void RemoveWebSocketClient(int fd) {
+  std::lock_guard<std::mutex> lock(g_ws_clients_mu);
+  g_ws_clients.erase(
+      std::remove_if(g_ws_clients.begin(), g_ws_clients.end(),
+                     [&](const std::shared_ptr<WebSocketClient>& c) { return c->fd == fd; }),
+      g_ws_clients.end());
+}
+
+int BroadcastToWebSockets(const std::string& message) {
+  std::vector<std::shared_ptr<WebSocketClient>> snapshot;
+  {
+    std::lock_guard<std::mutex> lock(g_ws_clients_mu);
+    snapshot = g_ws_clients;
+  }
+
+  int delivered = 0;
+  for (const auto& client : snapshot) {
+    if (client->fd < 0) {
+      continue;
+    }
+    if (SendWebSocketFrame(client->fd, 0x1, message)) {
+      ++delivered;
+      continue;
+    }
+    RemoveWebSocketClient(client->fd);
+    close(client->fd);
+    client->fd = -1;
+  }
+  return delivered;
+}
+
+bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req) {
+  auto key_it = req.headers.find("sec-websocket-key");
+  if (key_it == req.headers.end() || key_it->second.empty()) {
+    return false;
+  }
+
+  const std::string accept_seed = key_it->second + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+  const auto digest = Sha1(accept_seed);
+  const std::string accept = Base64Encode(digest.data(), digest.size());
+
+  std::ostringstream response;
+  response << "HTTP/1.1 101 Switching Protocols\r\n";
+  response << "Upgrade: websocket\r\n";
+  response << "Connection: Upgrade\r\n";
+  response << "Sec-WebSocket-Accept: " << accept << "\r\n\r\n";
+
+  if (!SendAll(client_fd, response.str())) {
+    return false;
+  }
+
+  auto ws_client = AddWebSocketClient(client_fd);
+  while (true) {
+    uint8_t opcode = 0;
+    std::string payload;
+    if (!ReadWebSocketFrame(client_fd, opcode, payload)) {
+      break;
+    }
+    if (opcode == 0x8) {  // close
+      SendWebSocketFrame(client_fd, 0x8, "");
+      break;
+    }
+    if (opcode == 0x9) {  // ping
+      SendWebSocketFrame(client_fd, 0xA, payload);
+    }
+  }
+
+  RemoveWebSocketClient(client_fd);
+  close(client_fd);
+  ws_client->fd = -1;
+  return true;
 }
 
 int CreateServerSocket(int port) {
@@ -389,6 +680,96 @@ int CreateServerSocket(int port) {
     return -1;
   }
   return fd;
+}
+
+void HandleClientConnection(int client_fd, const std::string redis_host, const int redis_port,
+                            const std::string stream_name) {
+  HttpRequest req;
+  if (!ReadHttpRequest(client_fd, req)) {
+    WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"invalid request\"}");
+    close(client_fd);
+    return;
+  }
+
+  const std::string path = StripQuery(req.path);
+
+  if (req.method == "GET" && path == "/health") {
+    WriteHttpResponse(client_fd, 200, "OK", "{\"status\":\"ok\"}");
+    close(client_fd);
+    return;
+  }
+
+  if (req.method == "GET" && path == "/ws") {
+    if (!HandleWebSocketUpgrade(client_fd, req)) {
+      WriteHttpResponse(client_fd, 400, "Bad Request",
+                        "{\"error\":\"invalid websocket upgrade\"}");
+      close(client_fd);
+    }
+    return;
+  }
+
+  if (req.method == "POST" && path == "/v1/internal/deliver") {
+    if (req.body.empty()) {
+      WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"body is required\"}");
+      close(client_fd);
+      return;
+    }
+    const int delivered = BroadcastToWebSockets(req.body);
+    std::ostringstream body;
+    body << "{\"status\":\"broadcasted\",\"clients\":" << delivered << "}";
+    WriteHttpResponse(client_fd, 202, "Accepted", body.str());
+    close(client_fd);
+    return;
+  }
+
+  if (req.method != "POST" || path != "/v1/notifications") {
+    WriteHttpResponse(client_fd, 404, "Not Found", "{\"error\":\"route not found\"}");
+    close(client_fd);
+    return;
+  }
+
+  auto content = ExtractJsonStringField(req.body, "content");
+  if (!content.has_value() || content->empty()) {
+    WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"content is required\"}");
+    close(client_fd);
+    return;
+  }
+
+  std::string tenant_id;
+  if (auto from_token = ExtractTenantFromJwt(req.headers); from_token.has_value()) {
+    tenant_id = from_token.value();
+  } else if (auto from_body = ExtractJsonStringField(req.body, "tenant_id"); from_body.has_value()) {
+    tenant_id = from_body.value();
+  } else {
+    WriteHttpResponse(client_fd, 401, "Unauthorized",
+                      "{\"error\":\"tenant_id not found in JWT or payload\"}");
+    close(client_fd);
+    return;
+  }
+
+  const std::string user_id = ExtractJsonStringField(req.body, "user_id").value_or("unknown-user");
+  const std::string channel = ExtractJsonStringField(req.body, "channel").value_or("default");
+
+  std::unordered_map<std::string, std::string> fields = {
+      {"tenant_id", tenant_id},
+      {"user_id", user_id},
+      {"channel", channel},
+      {"content", content.value()},
+  };
+
+  std::string redis_reply;
+  if (!PublishToRedisStream(redis_host, redis_port, stream_name, fields, redis_reply)) {
+    WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                      "{\"error\":\"failed to publish to redis stream\"}");
+    close(client_fd);
+    return;
+  }
+
+  std::ostringstream response;
+  response << "{\"status\":\"accepted\",\"tenant_id\":\"" << tenant_id
+           << "\",\"stream\":\"" << stream_name << "\"}";
+  WriteHttpResponse(client_fd, 202, "Accepted", response.str());
+  close(client_fd);
 }
 
 }  // namespace
@@ -422,69 +803,9 @@ int main() {
       continue;
     }
 
-    HttpRequest req;
-    if (!ReadHttpRequest(client_fd, req)) {
-      WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"invalid request\"}");
-      close(client_fd);
-      continue;
-    }
-
-    if (req.method == "GET" && req.path == "/health") {
-      WriteHttpResponse(client_fd, 200, "OK", "{\"status\":\"ok\"}");
-      close(client_fd);
-      continue;
-    }
-
-    if (req.method != "POST" || req.path != "/v1/notifications") {
-      WriteHttpResponse(client_fd, 404, "Not Found", "{\"error\":\"route not found\"}");
-      close(client_fd);
-      continue;
-    }
-
-    auto content = ExtractJsonStringField(req.body, "content");
-    if (!content.has_value() || content->empty()) {
-      WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"content is required\"}");
-      close(client_fd);
-      continue;
-    }
-
-    std::string tenant_id;
-    if (auto from_token = ExtractTenantFromJwt(req.headers); from_token.has_value()) {
-      tenant_id = from_token.value();
-    } else if (auto from_body = ExtractJsonStringField(req.body, "tenant_id"); from_body.has_value()) {
-      tenant_id = from_body.value();
-    } else {
-      WriteHttpResponse(client_fd, 401, "Unauthorized",
-                        "{\"error\":\"tenant_id not found in JWT or payload\"}");
-      close(client_fd);
-      continue;
-    }
-
-    const std::string user_id =
-        ExtractJsonStringField(req.body, "user_id").value_or("unknown-user");
-    const std::string channel =
-        ExtractJsonStringField(req.body, "channel").value_or("default");
-
-    std::unordered_map<std::string, std::string> fields = {
-        {"tenant_id", tenant_id},
-        {"user_id", user_id},
-        {"channel", channel},
-        {"content", content.value()},
-    };
-
-    std::string redis_reply;
-    if (!PublishToRedisStream(redis_host, redis_port, stream_name, fields, redis_reply)) {
-      WriteHttpResponse(client_fd, 503, "Service Unavailable",
-                        "{\"error\":\"failed to publish to redis stream\"}");
-      close(client_fd);
-      continue;
-    }
-
-    std::ostringstream response;
-    response << "{\"status\":\"accepted\",\"tenant_id\":\"" << tenant_id
-             << "\",\"stream\":\"" << stream_name << "\"}";
-    WriteHttpResponse(client_fd, 202, "Accepted", response.str());
-    close(client_fd);
+    std::thread([client_fd, redis_host, redis_port, stream_name]() {
+      HandleClientConnection(client_fd, redis_host, redis_port, stream_name);
+    }).detach();
   }
 
   close(server_fd);
