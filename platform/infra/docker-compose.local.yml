@@ -16,10 +16,16 @@ services:
       dockerfile: platform/Dockerfile
       args:
         SERVICE_TARGET: notification_storage
+        INSTALL_CASSANDRA_TOOLS: "true"
     container_name: mtnp-storage
     environment:
       - STORAGE_PORT=8090
+      - STORAGE_BACKEND=cassandra
+      - STORAGE_FALLBACK_TO_FILE=true
       - STORAGE_DATA_FILE=/data/notification_storage.log
+      - CASSANDRA_HOST=cassandra
+      - CASSANDRA_PORT=9042
+      - CASSANDRA_KEYSPACE=notification_platform
     ports:
       - "8090:8090"
     volumes:
@@ -27,6 +33,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
 
   notification-dispatcher:
     build:
@@ -87,6 +95,16 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
+
+  cassandra-init:
+    image: cassandra:5.0
+    container_name: mtnp-cassandra-init
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./cassandra/schema.cql:/schema/schema.cql:ro
+    command: ["sh", "-c", "cqlsh cassandra 9042 -f /schema/schema.cql"]
 
 volumes:
   storage_data:

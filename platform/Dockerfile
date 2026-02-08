@@ -13,9 +13,12 @@ RUN cmake -S platform -B platform/build && \
     cmake --build platform/build --target ${SERVICE_TARGET} --config Release
 
 FROM ubuntu:24.04 AS runtime
+ARG INSTALL_CASSANDRA_TOOLS=false
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      ca-certificates && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && \
+    if [ "$INSTALL_CASSANDRA_TOOLS" = "true" ]; then \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cassandra-tools; \
+    fi && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

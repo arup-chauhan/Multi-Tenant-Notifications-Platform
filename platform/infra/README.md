@@ -10,3 +10,7 @@ Runtime stack:
 4. Notification Gateway service
 5. Cassandra
 6. Prometheus + Grafana (deployment extension)
+
+Schema initialization:
+
+1. `platform/infra/cassandra/schema.cql` is applied by `cassandra-init` during local compose startup.

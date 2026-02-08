@@ -201,7 +201,7 @@ Primary storage components:
 Representative entities:
 
 - `notifications` (tenant_id, notification_id, payload, created_at)
-- `delivery_status` (tenant_id, notification_id, recipient_id, state, attempts, last_error)
+- `delivery_status` (tenant_id, notification_id, status_ts, user_id, channel, content, status, attempt, error)
 - `tenant_audit_log` (tenant_id, event_type, event_time, metadata)
 
 Partitioning and access are tenant-first to preserve isolation and predictable query behavior.
@@ -387,6 +387,7 @@ This starts:
 2. `notification-storage` on `:8090`
 3. `notification-dispatcher` worker
 4. Redis and Cassandra dependencies
+5. `cassandra-init` schema bootstrap job
 
 ---
 

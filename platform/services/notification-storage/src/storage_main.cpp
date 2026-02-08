@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -35,6 +36,28 @@ std::optional<int> ParseIntEnv(const char* key, int fallback) {
   } catch (...) {
     return std::nullopt;
   }
+}
+
+std::string ParseStrEnv(const char* key, const std::string& fallback) {
+  const char* value = std::getenv(key);
+  return value == nullptr ? fallback : value;
+}
+
+bool ParseBoolEnv(const char* key, bool fallback) {
+  const char* value = std::getenv(key);
+  if (value == nullptr) {
+    return fallback;
+  }
+  std::string v(value);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (v == "1" || v == "true" || v == "yes") {
+    return true;
+  }
+  if (v == "0" || v == "false" || v == "no") {
+    return false;
+  }
+  return fallback;
 }
 
 std::string Trim(const std::string& input) {
@@ -188,7 +211,72 @@ std::optional<std::string> ExtractJsonStringField(const std::string& json, const
   return json.substr(q1 + 1, q2 - q1 - 1);
 }
 
-bool AppendRecord(const std::string& file_path, const std::string& payload) {
+std::optional<std::string> ExtractJsonNumberField(const std::string& json, const std::string& key) {
+  const std::string needle = "\"" + key + "\"";
+  size_t k = json.find(needle);
+  if (k == std::string::npos) {
+    return std::nullopt;
+  }
+  size_t colon = json.find(':', k + needle.size());
+  if (colon == std::string::npos) {
+    return std::nullopt;
+  }
+  size_t start = colon + 1;
+  while (start < json.size() && std::isspace(static_cast<unsigned char>(json[start]))) {
+    ++start;
+  }
+  size_t end = start;
+  if (end < json.size() && (json[end] == '-' || json[end] == '+')) {
+    ++end;
+  }
+  while (end < json.size() && std::isdigit(static_cast<unsigned char>(json[end]))) {
+    ++end;
+  }
+  if (end == start) {
+    return std::nullopt;
+  }
+  return json.substr(start, end - start);
+}
+
+std::string EscapeForCql(const std::string& value) {
+  std::string out;
+  out.reserve(value.size());
+  for (char c : value) {
+    if (c == '\'') {
+      out += "''";
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+bool RunCql(const std::string& cassandra_host, int cassandra_port, const std::string& cql) {
+  char file_template[] = "/tmp/storage-cql-XXXXXX";
+  int fd = mkstemp(file_template);
+  if (fd < 0) {
+    return false;
+  }
+
+  {
+    std::ofstream temp(file_template);
+    if (!temp.is_open()) {
+      close(fd);
+      std::remove(file_template);
+      return false;
+    }
+    temp << cql;
+  }
+  close(fd);
+
+  std::ostringstream cmd;
+  cmd << "cqlsh " << cassandra_host << " " << cassandra_port << " -f " << file_template;
+  int rc = std::system(cmd.str().c_str());
+  std::remove(file_template);
+  return rc == 0;
+}
+
+bool AppendRecordFile(const std::string& file_path, const std::string& payload) {
   std::ofstream out(file_path, std::ios::app);
   if (!out.is_open()) {
     return false;
@@ -196,6 +284,46 @@ bool AppendRecord(const std::string& file_path, const std::string& payload) {
   std::time_t now = std::time(nullptr);
   out << "{\"ts\":" << static_cast<long long>(now) << ",\"record\":" << payload << "}\n";
   return true;
+}
+
+bool PersistRecord(const std::string& backend,
+                   const std::string& storage_file,
+                   bool fallback_to_file,
+                   const std::string& cassandra_host,
+                   int cassandra_port,
+                   const std::string& cassandra_keyspace,
+                   const std::string& body,
+                   const std::string& tenant_id,
+                   const std::string& notification_id,
+                   const std::string& user_id,
+                   const std::string& channel,
+                   const std::string& content,
+                   const std::string& status,
+                   const std::string& attempt,
+                   const std::string& error) {
+  if (backend == "cassandra") {
+    std::ostringstream cql;
+    cql << "INSERT INTO " << cassandra_keyspace << ".delivery_status "
+        << "(tenant_id, notification_id, status_ts, user_id, channel, content, status, attempt, error) VALUES ("
+        << "'" << EscapeForCql(tenant_id) << "',"
+        << "'" << EscapeForCql(notification_id) << "',"
+        << "toTimestamp(now()),"
+        << "'" << EscapeForCql(user_id) << "',"
+        << "'" << EscapeForCql(channel) << "',"
+        << "'" << EscapeForCql(content) << "',"
+        << "'" << EscapeForCql(status) << "',"
+        << attempt << ","
+        << "'" << EscapeForCql(error) << "');\n";
+
+    if (RunCql(cassandra_host, cassandra_port, cql.str())) {
+      return true;
+    }
+    if (!fallback_to_file) {
+      return false;
+    }
+  }
+
+  return AppendRecordFile(storage_file, body);
 }
 
 int CreateServerSocket(int port) {
@@ -225,15 +353,20 @@ int CreateServerSocket(int port) {
 
 int main() {
   const auto port_opt = ParseIntEnv("STORAGE_PORT", 8090);
-  if (!port_opt.has_value()) {
-    std::cerr << "invalid STORAGE_PORT\n";
+  const auto cassandra_port_opt = ParseIntEnv("CASSANDRA_PORT", 9042);
+  if (!port_opt.has_value() || !cassandra_port_opt.has_value()) {
+    std::cerr << "invalid numeric env\n";
     return 1;
   }
 
   const int port = port_opt.value();
-  const std::string storage_file =
-      std::getenv("STORAGE_DATA_FILE") ? std::getenv("STORAGE_DATA_FILE")
-                                       : "/tmp/notification_storage.log";
+  const int cassandra_port = cassandra_port_opt.value();
+
+  const std::string storage_file = ParseStrEnv("STORAGE_DATA_FILE", "/tmp/notification_storage.log");
+  const std::string backend = ToLower(ParseStrEnv("STORAGE_BACKEND", "cassandra"));
+  const bool fallback_to_file = ParseBoolEnv("STORAGE_FALLBACK_TO_FILE", true);
+  const std::string cassandra_host = ParseStrEnv("CASSANDRA_HOST", "cassandra");
+  const std::string cassandra_keyspace = ParseStrEnv("CASSANDRA_KEYSPACE", "notification_platform");
 
   int server_fd = CreateServerSocket(port);
   if (server_fd < 0) {
@@ -242,7 +375,10 @@ int main() {
   }
 
   std::cout << "notification-storage listening on :" << port
-            << " file=" << storage_file << "\n";
+            << " backend=" << backend
+            << " cassandra=" << cassandra_host << ":" << cassandra_port
+            << " keyspace=" << cassandra_keyspace
+            << " fallback_to_file=" << (fallback_to_file ? "true" : "false") << "\n";
 
   while (true) {
     sockaddr_in client_addr{};
@@ -272,8 +408,14 @@ int main() {
     }
 
     const auto tenant = ExtractJsonStringField(req.body, "tenant_id");
-    const auto status = ExtractJsonStringField(req.body, "status");
     const auto notification_id = ExtractJsonStringField(req.body, "notification_id");
+    const auto user_id = ExtractJsonStringField(req.body, "user_id");
+    const auto channel = ExtractJsonStringField(req.body, "channel");
+    const auto content = ExtractJsonStringField(req.body, "content");
+    const auto status = ExtractJsonStringField(req.body, "status");
+    const auto attempt = ExtractJsonNumberField(req.body, "attempt");
+    const auto error = ExtractJsonStringField(req.body, "error");
+
     if (!tenant.has_value() || !status.has_value() || !notification_id.has_value()) {
       WriteHttpResponse(client_fd, 400, "Bad Request",
                         "{\"error\":\"tenant_id, status and notification_id are required\"}");
@@ -281,7 +423,13 @@ int main() {
       continue;
     }
 
-    if (!AppendRecord(storage_file, req.body)) {
+    const std::string attempt_value = attempt.value_or("0");
+    if (!PersistRecord(backend, storage_file, fallback_to_file,
+                       cassandra_host, cassandra_port, cassandra_keyspace,
+                       req.body,
+                       tenant.value(), notification_id.value(), user_id.value_or("unknown"),
+                       channel.value_or("default"), content.value_or(""),
+                       status.value(), attempt_value, error.value_or(""))) {
       WriteHttpResponse(client_fd, 500, "Internal Server Error",
                         "{\"error\":\"failed to persist record\"}");
       close(client_fd);
