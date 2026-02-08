@@ -81,6 +81,21 @@ std::optional<int> ParseIntEnv(const char* key, int fallback) {
   }
 }
 
+bool ParseBoolEnv(const char* key, bool fallback) {
+  const char* value = std::getenv(key);
+  if (value == nullptr) {
+    return fallback;
+  }
+  std::string v = ToLower(value);
+  if (v == "1" || v == "true" || v == "yes") {
+    return true;
+  }
+  if (v == "0" || v == "false" || v == "no") {
+    return false;
+  }
+  return fallback;
+}
+
 std::optional<std::string> ExtractJsonStringField(const std::string& json,
                                                   const std::string& field) {
   const std::string needle = "\"" + field + "\"";
@@ -707,7 +722,7 @@ int BroadcastToWebSockets(const std::string& message, const std::string& tenant_
 }
 
 bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req,
-                            const std::string& jwt_hs256_secret) {
+                            const std::optional<std::string>& auth_tenant_id) {
   auto key_it = req.headers.find("sec-websocket-key");
   if (key_it == req.headers.end() || key_it->second.empty()) {
     return false;
@@ -728,16 +743,8 @@ bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req,
   }
 
   auto ws_client = AddWebSocketClient(client_fd);
-  const JwtTenantResult ws_jwt = ExtractTenantFromJwt(req.headers, jwt_hs256_secret);
-  if (ws_jwt.status == JwtTenantResult::Status::kInvalid) {
-    SendWebSocketFrame(client_fd, 0x8, "");
-    RemoveWebSocketClient(client_fd);
-    close(client_fd);
-    ws_client->fd = -1;
-    return true;
-  }
-  if (ws_jwt.status == JwtTenantResult::Status::kValid && ws_jwt.tenant_id.has_value()) {
-    SetWebSocketAuthTenant(client_fd, ws_jwt.tenant_id.value());
+  if (auth_tenant_id.has_value()) {
+    SetWebSocketAuthTenant(client_fd, auth_tenant_id.value());
   }
 
   while (true) {
@@ -805,7 +812,8 @@ int CreateServerSocket(int port) {
 
 void HandleClientConnection(int client_fd, const std::string redis_host, const int redis_port,
                             const std::string stream_name,
-                            const std::string jwt_hs256_secret) {
+                            const std::string jwt_hs256_secret,
+                            bool gateway_require_auth) {
   HttpRequest req;
   if (!ReadHttpRequest(client_fd, req)) {
     WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"invalid request\"}");
@@ -822,7 +830,21 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   }
 
   if (req.method == "GET" && path == "/ws") {
-    if (!HandleWebSocketUpgrade(client_fd, req, jwt_hs256_secret)) {
+    const JwtTenantResult ws_jwt = ExtractTenantFromJwt(req.headers, jwt_hs256_secret);
+    if (ws_jwt.status == JwtTenantResult::Status::kInvalid) {
+      WriteHttpResponse(client_fd, 401, "Unauthorized",
+                        "{\"error\":\"invalid bearer token\"}");
+      close(client_fd);
+      return;
+    }
+    if (gateway_require_auth && ws_jwt.status != JwtTenantResult::Status::kValid) {
+      WriteHttpResponse(client_fd, 401, "Unauthorized",
+                        "{\"error\":\"bearer token required\"}");
+      close(client_fd);
+      return;
+    }
+    std::optional<std::string> auth_tenant_id = ws_jwt.tenant_id;
+    if (!HandleWebSocketUpgrade(client_fd, req, auth_tenant_id)) {
       WriteHttpResponse(client_fd, 400, "Bad Request",
                         "{\"error\":\"invalid websocket upgrade\"}");
       close(client_fd);
@@ -866,6 +888,11 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   } else if (jwt_result.status == JwtTenantResult::Status::kInvalid) {
     WriteHttpResponse(client_fd, 401, "Unauthorized",
                       "{\"error\":\"invalid bearer token\"}");
+    close(client_fd);
+    return;
+  } else if (gateway_require_auth) {
+    WriteHttpResponse(client_fd, 401, "Unauthorized",
+                      "{\"error\":\"bearer token required\"}");
     close(client_fd);
     return;
   } else if (auto from_body = ExtractJsonStringField(req.body, "tenant_id"); from_body.has_value()) {
@@ -919,6 +946,7 @@ int main() {
       std::getenv("REDIS_STREAM_NAME") ? std::getenv("REDIS_STREAM_NAME") : "notifications_stream";
   const std::string jwt_hs256_secret =
       std::getenv("JWT_HS256_SECRET") ? std::getenv("JWT_HS256_SECRET") : "";
+  const bool gateway_require_auth = ParseBoolEnv("GATEWAY_REQUIRE_AUTH", false);
 
   int server_fd = CreateServerSocket(port);
   if (server_fd < 0) {
@@ -935,8 +963,10 @@ int main() {
       continue;
     }
 
-    std::thread([client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret]() {
-      HandleClientConnection(client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret);
+    std::thread([client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret,
+                 gateway_require_auth]() {
+      HandleClientConnection(client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret,
+                             gateway_require_auth);
     }).detach();
   }
 

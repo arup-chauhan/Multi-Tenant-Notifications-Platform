@@ -12,6 +12,7 @@ jobs:
     timeout-minutes: 45
     env:
       JWT_HS256_SECRET: ci-jwt-secret
+      GATEWAY_REQUIRE_AUTH: "true"
 
     steps:
       - name: Checkout
@@ -36,8 +37,25 @@ jobs:
       - name: Run end-to-end smoke
         run: bash platform/tests/e2e/smoke_e2e.sh
 
+      - name: Generate k6 bearer token
+        id: k6_token
+        run: |
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          iat="$(date +%s)"
+          header='{"alg":"HS256","typ":"JWT"}'
+          payload='{"tenant_id":"tenant-demo","sub":"k6-smoke","iat":'"$iat"'}'
+          h="$(printf '%s' "$header" | b64url)"
+          p="$(printf '%s' "$payload" | b64url)"
+          s_input="${h}.${p}"
+          sig="$(printf '%s' "$s_input" | openssl dgst -binary -sha256 -hmac "$JWT_HS256_SECRET" | b64url)"
+          echo "token=${s_input}.${sig}" >> "$GITHUB_OUTPUT"
+
       - name: Run k6 HTTP smoke
-        run: k6 run platform/tests/load/k6/smoke_submit.ts
+        run: |
+          k6 run \
+            --env K6_BEARER_TOKEN='${{ steps.k6_token.outputs.token }}' \
+            --env K6_TENANT_ID='tenant-demo' \
+            platform/tests/load/k6/smoke_submit.ts
 
       - name: Docker compose logs on failure
         if: failure()

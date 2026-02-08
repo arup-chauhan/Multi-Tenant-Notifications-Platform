@@ -76,6 +76,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_STREAM_NAME=notifications_stream
       - JWT_HS256_SECRET=${JWT_HS256_SECRET:-}
+      - GATEWAY_REQUIRE_AUTH=${GATEWAY_REQUIRE_AUTH:-false}
     ports:
       - "8080:8080"
     depends_on:
