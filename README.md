@@ -18,6 +18,7 @@ A production-grade, event-driven notification platform for low-latency, reliable
 - [Security and Tenant Isolation](#security-and-tenant-isolation)
 - [Observability and SLOs](#observability-and-slos)
 - [Performance Profile](#performance-profile)
+- [Load Testing](#load-testing)
 - [Local Deployment](#local-deployment)
 - [Production Deployment](#production-deployment)
 - [Repository Layout](#repository-layout)
@@ -279,6 +280,91 @@ Latency budget model:
 
 ---
 
+## Load Testing
+
+This project uses both `k6` and `wrk`:
+
+1. `k6` for HTTP + WebSocket scenario testing and scripting.
+2. `wrk` for high-throughput HTTP baseline and ingress saturation testing.
+
+### k6
+
+Install `k6` locally, then run from repository root.
+
+HTTP smoke:
+
+```bash
+k6 run platform/tests/load/k6/smoke_submit.js
+```
+
+HTTP steady load:
+
+```bash
+k6 run platform/tests/load/k6/steady_state.js
+```
+
+HTTP burst:
+
+```bash
+k6 run platform/tests/load/k6/burst_spike.js
+```
+
+WebSocket scenarios:
+
+```bash
+k6 run platform/tests/load/k6/websocket_fanout.js
+k6 run platform/tests/load/k6/reconnect_storm.js
+k6 run platform/tests/load/k6/slow_consumer.js
+```
+
+Note: WebSocket suites require the `/ws` endpoint to be active in the running gateway build.
+
+Save result artifacts:
+
+```bash
+k6 run --out json=platform/tests/load/k6/results/steady_state.json \
+  platform/tests/load/k6/steady_state.js
+```
+
+Use the helper runner:
+
+```bash
+bash platform/tests/load/k6/run_local.sh
+```
+
+---
+
+### wrk
+
+Install `wrk` locally, then run from repository root.
+
+HTTP health baseline:
+
+```bash
+wrk -t2 -c20 -d10s -s platform/tests/load/wrk/health_check.lua http://127.0.0.1:8080
+```
+
+Ingress stress:
+
+```bash
+wrk -t8 -c200 -d60s -s platform/tests/load/wrk/post_notifications.lua http://127.0.0.1:8080
+```
+
+Auth variant:
+
+```bash
+export WRK_BEARER_TOKEN="<token>"
+wrk -t8 -c200 -d60s -s platform/tests/load/wrk/post_notifications_auth.lua http://127.0.0.1:8080
+```
+
+Use helper runner:
+
+```bash
+bash platform/tests/load/wrk/run_local.sh
+```
+
+---
+
 ## Local Deployment
 
 Prerequisites:
@@ -326,3 +412,4 @@ Supported production model:
 - `platform/services/notification-storage/` - persistence adapter and query operations
 - `platform/infra/` - local infrastructure definitions (Redis, Cassandra)
 - `platform/tests/load/k6/` - load and reliability test suites
+- `platform/tests/load/wrk/` - HTTP throughput and ingress baseline tests
