@@ -291,7 +291,7 @@ Build and run:
 
 ```bash
 cd platform/infra
-docker compose up -d
+docker compose -f docker-compose.local.yml up -d
 
 cd ../..
 cd platform
@@ -316,11 +316,11 @@ Supported production model:
 
 ## Repository Layout
 
-- `docs/` - architecture and operational documentation
+- `docs/system-architecture.md` - architecture reference
+- `docs/operations-runbook.md` - runtime and incident operations
 - `platform/common/` - shared contracts and utilities
-- `platform/services/gateway/` - ingress and websocket edge service
-- `platform/services/dispatcher/` - stream processing and delivery orchestration
-- `platform/services/storage/` - persistence adapter and query operations
+- `platform/services/notification-gateway/` - ingress and websocket edge service
+- `platform/services/notification-dispatcher/` - stream processing and delivery orchestration
+- `platform/services/notification-storage/` - persistence adapter and query operations
 - `platform/infra/` - local infrastructure definitions (Redis, Cassandra)
-- `platform/tests/k6/` - load and reliability test suites
-
+- `platform/tests/load/k6/` - load and reliability test suites

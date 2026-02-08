@@ -28,3 +28,15 @@ Build a multi-tenant, low-latency notification platform with clear reliability s
 2. Tenant-scoped stream keys and Cassandra partition keys.
 3. Tenant-specific quota and rate policies.
 4. Tenant-level latency and failure metrics.
+
+## Service Topology
+
+```mermaid
+flowchart LR
+    A[Clients] --> B[gateway]
+    B --> C[(Redis Streams)]
+    C --> D[dispatcher]
+    D --> E[storage]
+    E --> F[(Cassandra)]
+    D --> B
+```

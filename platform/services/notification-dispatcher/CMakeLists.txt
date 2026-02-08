@@ -1,0 +1,1 @@
+add_executable(notification_dispatcher src/dispatcher_main.cpp)

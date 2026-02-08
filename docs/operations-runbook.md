@@ -1,6 +1,6 @@
 # Runbook
 
-## Local Bootstrap (Planned)
+## Local Bootstrap
 
 1. Start infra: Redis + Cassandra via Docker Compose.
 2. Build C++ services via CMake.
