@@ -6,10 +6,7 @@
 2. Build C++ services via CMake.
 3. Start `gateway`, `dispatcher`, and `storage`.
 4. Run smoke test:
-   - submit notification
-   - verify stream enqueue
-   - verify Cassandra write
-   - verify WebSocket delivery
+   - `bash platform/tests/e2e/smoke_e2e.sh`
 5. Run load validation:
    - `bash platform/tests/load/run_all.sh`
 

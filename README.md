@@ -19,6 +19,7 @@ A production-grade, event-driven notification platform for low-latency, reliable
 - [Observability and SLOs](#observability-and-slos)
 - [Performance Profile](#performance-profile)
 - [Load Testing](#load-testing)
+- [End-to-End Smoke Test](#end-to-end-smoke-test)
 - [Local Deployment](#local-deployment)
 - [Frontend (Next.js + TypeScript)](#frontend-nextjs--typescript)
 - [Production Deployment](#production-deployment)
@@ -388,6 +389,25 @@ bash platform/tests/load/run_all.sh
 
 ---
 
+## End-to-End Smoke Test
+
+Run a single command to verify HTTP ingress, WebSocket delivery, Redis stream write, and Cassandra persistence:
+
+```bash
+bash platform/tests/e2e/smoke_e2e.sh
+```
+
+The script executes:
+
+1. Service health checks
+2. WebSocket + POST validation via `k6`
+3. Redis stream entry verification
+4. Cassandra `delivery_status` lookup validation
+
+Environment overrides are documented in `platform/tests/e2e/README.md`.
+
+---
+
 ## Local Deployment
 
 Prerequisites:
@@ -462,4 +482,5 @@ Supported production model:
 - `platform/infra/` - local infrastructure definitions (Redis, Cassandra)
 - `platform/tests/load/k6/` - load and reliability test suites
 - `platform/tests/load/wrk/` - HTTP throughput and ingress baseline tests
+- `platform/tests/e2e/` - end-to-end smoke verification scripts
 - `frontend/` - Next.js + TypeScript operator console
