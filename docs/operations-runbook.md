@@ -10,6 +10,8 @@
    - verify stream enqueue
    - verify Cassandra write
    - verify WebSocket delivery
+5. Run load validation:
+   - `bash platform/tests/load/run_all.sh`
 
 ## Operational Checks
 
@@ -18,6 +20,7 @@
 3. Delivery p95 and p99 latency.
 4. WebSocket active session count.
 5. Cassandra write/read timeouts.
+6. Retry stream growth and replay drain rate.
 
 ## Incident Basics
 

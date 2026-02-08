@@ -287,6 +287,7 @@ This project uses both `k6` and `wrk`:
 
 1. `k6` for HTTP + WebSocket scenario testing and scripting.
 2. `wrk` for high-throughput HTTP baseline and ingress saturation testing.
+3. Run both together with `platform/tests/load/run_all.sh`.
 
 ### k6
 
@@ -333,6 +334,12 @@ Use the helper runner:
 bash platform/tests/load/k6/run_local.sh
 ```
 
+Skip WebSocket scenarios when you only want HTTP:
+
+```bash
+HTTP_ONLY=true bash platform/tests/load/k6/run_local.sh
+```
+
 ---
 
 ### wrk
@@ -362,6 +369,21 @@ Use helper runner:
 
 ```bash
 bash platform/tests/load/wrk/run_local.sh
+```
+
+Tune wrk load profile:
+
+```bash
+BASE_URL=http://127.0.0.1:8080 DURATION=45s THREADS=8 CONNECTIONS=300 \
+  bash platform/tests/load/wrk/run_local.sh
+```
+
+---
+
+Run both suites in one command:
+
+```bash
+bash platform/tests/load/run_all.sh
 ```
 
 ---

@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESULT_DIR="$ROOT_DIR/results"
 mkdir -p "$RESULT_DIR"
 
+HTTP_ONLY="${HTTP_ONLY:-false}"
+
 echo "[k6] Running smoke_submit.ts"
 k6 run --out json="$RESULT_DIR/smoke_submit.json" "$ROOT_DIR/smoke_submit.ts"
 
@@ -13,5 +15,16 @@ k6 run --out json="$RESULT_DIR/steady_state.json" "$ROOT_DIR/steady_state.ts"
 
 echo "[k6] Running burst_spike.ts"
 k6 run --out json="$RESULT_DIR/burst_spike.json" "$ROOT_DIR/burst_spike.ts"
+
+if [[ "$HTTP_ONLY" != "true" ]]; then
+  echo "[k6] Running websocket_fanout.ts"
+  k6 run --out json="$RESULT_DIR/websocket_fanout.json" "$ROOT_DIR/websocket_fanout.ts"
+
+  echo "[k6] Running reconnect_storm.ts"
+  k6 run --out json="$RESULT_DIR/reconnect_storm.json" "$ROOT_DIR/reconnect_storm.ts"
+
+  echo "[k6] Running slow_consumer.ts"
+  k6 run --out json="$RESULT_DIR/slow_consumer.json" "$ROOT_DIR/slow_consumer.ts"
+fi
 
 echo "[k6] Completed. Results in $RESULT_DIR"

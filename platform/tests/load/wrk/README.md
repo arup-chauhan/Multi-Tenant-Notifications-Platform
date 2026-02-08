@@ -29,3 +29,10 @@ bash platform/tests/load/wrk/run_local.sh
 ```
 
 Outputs are saved in `platform/tests/load/wrk/results/`.
+
+Tune runtime parameters via environment variables:
+
+```bash
+BASE_URL=http://127.0.0.1:8080 DURATION=45s THREADS=8 CONNECTIONS=300 \
+  bash platform/tests/load/wrk/run_local.sh
+```

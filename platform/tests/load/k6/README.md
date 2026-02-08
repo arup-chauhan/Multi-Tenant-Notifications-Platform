@@ -24,6 +24,12 @@ Full local run helper:
 bash platform/tests/load/k6/run_local.sh
 ```
 
+HTTP-only run (skip WebSocket suites):
+
+```bash
+HTTP_ONLY=true bash platform/tests/load/k6/run_local.sh
+```
+
 Companion HTTP baseline tool:
 
 - Use `platform/tests/load/wrk/` when you want raw ingress saturation numbers.
