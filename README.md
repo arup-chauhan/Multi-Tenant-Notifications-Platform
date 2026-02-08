@@ -20,6 +20,7 @@ A production-grade, event-driven notification platform for low-latency, reliable
 - [Performance Profile](#performance-profile)
 - [Load Testing](#load-testing)
 - [Local Deployment](#local-deployment)
+- [Frontend (React + TypeScript)](#frontend-react--typescript)
 - [Production Deployment](#production-deployment)
 - [Repository Layout](#repository-layout)
 
@@ -294,27 +295,27 @@ Install `k6` locally, then run from repository root.
 HTTP smoke:
 
 ```bash
-k6 run platform/tests/load/k6/smoke_submit.js
+k6 run platform/tests/load/k6/smoke_submit.ts
 ```
 
 HTTP steady load:
 
 ```bash
-k6 run platform/tests/load/k6/steady_state.js
+k6 run platform/tests/load/k6/steady_state.ts
 ```
 
 HTTP burst:
 
 ```bash
-k6 run platform/tests/load/k6/burst_spike.js
+k6 run platform/tests/load/k6/burst_spike.ts
 ```
 
 WebSocket scenarios:
 
 ```bash
-k6 run platform/tests/load/k6/websocket_fanout.js
-k6 run platform/tests/load/k6/reconnect_storm.js
-k6 run platform/tests/load/k6/slow_consumer.js
+k6 run platform/tests/load/k6/websocket_fanout.ts
+k6 run platform/tests/load/k6/reconnect_storm.ts
+k6 run platform/tests/load/k6/slow_consumer.ts
 ```
 
 Note: WebSocket suites require the `/ws` endpoint to be active in the running gateway build.
@@ -323,7 +324,7 @@ Save result artifacts:
 
 ```bash
 k6 run --out json=platform/tests/load/k6/results/steady_state.json \
-  platform/tests/load/k6/steady_state.js
+  platform/tests/load/k6/steady_state.ts
 ```
 
 Use the helper runner:
@@ -389,6 +390,31 @@ This starts:
 
 ---
 
+## Frontend (React + TypeScript)
+
+Run the frontend app:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Default frontend URL:
+
+1. `http://localhost:5173`
+
+Environment file:
+
+1. `frontend/.env.example`
+
+Notes:
+
+1. Submit flow (`POST /v1/notifications`) is active with current gateway.
+2. Realtime feed uses `ws://localhost:8080/ws` and requires gateway WebSocket endpoint support.
+
+---
+
 ## Production Deployment
 
 The platform is containerized and deployment-ready for orchestrated runtimes.
@@ -413,3 +439,4 @@ Supported production model:
 - `platform/infra/` - local infrastructure definitions (Redis, Cassandra)
 - `platform/tests/load/k6/` - load and reliability test suites
 - `platform/tests/load/wrk/` - HTTP throughput and ingress baseline tests
+- `frontend/` - React + TypeScript operator console

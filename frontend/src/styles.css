@@ -1,0 +1,151 @@
+:root {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #e8edf2;
+  background: radial-gradient(circle at 10% 20%, #1e2a34, #111a22 50%, #0b1218);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 16px;
+  padding: 16px;
+  min-height: 100vh;
+}
+
+.panel {
+  background: rgba(16, 23, 31, 0.92);
+  border: 1px solid rgba(94, 145, 193, 0.3);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 14px 38px rgba(2, 7, 11, 0.5);
+}
+
+.subtitle {
+  margin-top: 4px;
+  color: #9cb3c8;
+}
+
+.form {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 0.92rem;
+  color: #d4e0eb;
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid #2b4257;
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: #0f1820;
+  color: #eef4fa;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #32b2ff, #1986d9);
+  color: #05131e;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.06);
+}
+
+.status {
+  margin-top: 16px;
+  color: #9ac3e5;
+  word-break: break-word;
+}
+
+.ws-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.badge.open {
+  color: #a2ffcf;
+  border-color: #2d7a57;
+  background: #0f2d21;
+}
+
+.badge.connecting {
+  color: #ffe2a0;
+  border-color: #997a36;
+  background: #2a2211;
+}
+
+.badge.closed,
+.badge.error {
+  color: #ffc4c4;
+  border-color: #8b4040;
+  background: #2c1515;
+}
+
+.ws-actions {
+  display: flex;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.feed {
+  border: 1px solid #2a3d4f;
+  border-radius: 8px;
+  background: #0a131a;
+  min-height: 360px;
+  max-height: calc(100vh - 220px);
+  overflow: auto;
+  padding: 10px;
+}
+
+.message {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: #132130;
+  border-left: 3px solid #39a6f2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.empty {
+  color: #8ca4b9;
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .feed {
+    max-height: 320px;
+  }
+}
