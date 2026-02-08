@@ -1,1 +1,42 @@
 .vscode/
+.idea/
+.DS_Store
+
+# Env files
+.env
+.env.local
+
+# Build output
+build/
+cmake-build-*/
+out/
+bin/
+lib/
+dist/
+target/
+
+# C/C++
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Logs and runtime
+*.log
+logs/
+tmp/
+*.pid
+
+# Planning docs
+GAPS.md
+TODO.md
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+coverage/
