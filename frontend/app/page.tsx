@@ -1,11 +1,13 @@
+"use client";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type ConnectionState = "connecting" | "open" | "closed" | "error";
 
-const httpBase = import.meta.env.VITE_GATEWAY_HTTP_BASE ?? "http://localhost:8080";
-const wsBase = import.meta.env.VITE_GATEWAY_WS_BASE ?? "ws://localhost:8080/ws";
+const httpBase = process.env.NEXT_PUBLIC_GATEWAY_HTTP_BASE ?? "http://localhost:8080";
+const wsBase = process.env.NEXT_PUBLIC_GATEWAY_WS_BASE ?? "ws://localhost:8080/ws";
 
-export default function App(): JSX.Element {
+export default function Page(): JSX.Element {
   const [tenantId, setTenantId] = useState("tenant-a");
   const [userId, setUserId] = useState("u1");
   const [channel, setChannel] = useState("alerts");
@@ -79,14 +81,14 @@ export default function App(): JSX.Element {
       const response = await fetch(`${httpBase}/v1/notifications`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
         body: JSON.stringify({
           tenant_id: tenantId,
           user_id: userId,
           channel,
-          content,
-        }),
+          content
+        })
       });
 
       const body = (await response.text()) || "";
@@ -106,7 +108,7 @@ export default function App(): JSX.Element {
     <div className="layout">
       <main className="panel left-panel">
         <h1>Multi-Tenant Notification Platform</h1>
-        <p className="subtitle">React + TypeScript operator console</p>
+        <p className="subtitle">Next.js + TypeScript operator console</p>
 
         <form className="form" onSubmit={submitNotification}>
           <label>

@@ -20,7 +20,7 @@ A production-grade, event-driven notification platform for low-latency, reliable
 - [Performance Profile](#performance-profile)
 - [Load Testing](#load-testing)
 - [Local Deployment](#local-deployment)
-- [Frontend (React + TypeScript)](#frontend-react--typescript)
+- [Frontend (Next.js + TypeScript)](#frontend-nextjs--typescript)
 - [Production Deployment](#production-deployment)
 - [Repository Layout](#repository-layout)
 
@@ -56,7 +56,7 @@ The platform is built around:
 
 ```mermaid
 flowchart LR
-    C[Client Apps] -->|HTTP POST /v1/notifications| G[Gateway Service]
+    C[Next.js Frontend] -->|HTTP POST /v1/notifications| G[Gateway Service]
     C -->|WebSocket /ws| G
 
     G -->|XADD| RS[(Redis Streams)]
@@ -139,21 +139,21 @@ Operationally, this separates event durability and worker coordination from comp
 
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant Frontend as Next.js Frontend
     participant Gateway
     participant Redis as Redis Streams
     participant Dispatcher
     participant Storage
     participant Cassandra
 
-    Client->>Gateway: POST /v1/notifications
+    Frontend->>Gateway: POST /v1/notifications
     Gateway->>Gateway: Validate JWT + tenant policy
     Gateway->>Redis: XADD notification event
     Redis->>Dispatcher: Consumer group delivery
     Dispatcher->>Storage: Persist notification state
     Storage->>Cassandra: Upsert records
     Dispatcher->>Gateway: Deliver to recipients
-    Gateway-->>Client: WebSocket notification
+    Gateway-->>Frontend: WebSocket notification
     Dispatcher->>Redis: ACK or retry schedule
     Dispatcher->>Redis: Route to DLQ on terminal failure
 ```
@@ -390,7 +390,7 @@ This starts:
 
 ---
 
-## Frontend (React + TypeScript)
+## Frontend (Next.js + TypeScript)
 
 Run the frontend app:
 
@@ -402,7 +402,7 @@ npm run dev
 
 Default frontend URL:
 
-1. `http://localhost:5173`
+1. `http://localhost:3000`
 
 Environment file:
 
@@ -439,4 +439,4 @@ Supported production model:
 - `platform/infra/` - local infrastructure definitions (Redis, Cassandra)
 - `platform/tests/load/k6/` - load and reliability test suites
 - `platform/tests/load/wrk/` - HTTP throughput and ingress baseline tests
-- `frontend/` - React + TypeScript operator console
+- `frontend/` - Next.js + TypeScript operator console
