@@ -262,11 +262,11 @@ bool XAck(int fd, const std::string& stream, const std::string& group,
   return reply.type == RespType::kInteger;
 }
 
-bool ReadNextBatch(int fd, const std::string& stream, const std::string& group,
-                   const std::string& consumer, int block_ms,
+bool ReadNextBatch(int fd, const std::string& main_stream, const std::string& retry_stream,
+                   const std::string& group, const std::string& consumer, int block_ms,
                    RespValue& out_reply) {
   return ExecRedis(fd, {"XREADGROUP", "GROUP", group, consumer, "COUNT", "10", "BLOCK",
-                        std::to_string(block_ms), "STREAMS", stream, ">"},
+                        std::to_string(block_ms), "STREAMS", main_stream, retry_stream, ">", ">"},
                    out_reply);
 }
 
@@ -440,8 +440,8 @@ int main() {
     return 1;
   }
 
-  if (!EnsureGroup(redis_fd, stream, group)) {
-    std::cerr << "failed to create/read stream group\n";
+  if (!EnsureGroup(redis_fd, stream, group) || !EnsureGroup(redis_fd, retry_stream, group)) {
+    std::cerr << "failed to create/read stream groups\n";
     close(redis_fd);
     return 1;
   }
@@ -452,12 +452,13 @@ int main() {
 
   while (true) {
     RespValue reply;
-    if (!ReadNextBatch(redis_fd, stream, group, consumer, block_ms, reply)) {
+    if (!ReadNextBatch(redis_fd, stream, retry_stream, group, consumer, block_ms, reply)) {
       std::cerr << "xreadgroup failed, reconnecting...\n";
       close(redis_fd);
       std::this_thread::sleep_for(std::chrono::seconds(1));
       redis_fd = ConnectRedis(redis_host, redis_port);
-      if (redis_fd < 0 || !EnsureGroup(redis_fd, stream, group)) {
+      if (redis_fd < 0 || !EnsureGroup(redis_fd, stream, group) ||
+          !EnsureGroup(redis_fd, retry_stream, group)) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
       }
       continue;
@@ -471,6 +472,12 @@ int main() {
       if (stream_entry.type != RespType::kArray || stream_entry.array.size() != 2) {
         continue;
       }
+      const RespValue& stream_name_value = stream_entry.array[0];
+      if (!(stream_name_value.type == RespType::kBulkString ||
+            stream_name_value.type == RespType::kSimpleString)) {
+        continue;
+      }
+      const std::string source_stream = stream_name_value.str;
       const RespValue& messages = stream_entry.array[1];
       if (messages.type != RespType::kArray) {
         continue;
@@ -521,7 +528,7 @@ int main() {
         }
 
         if (!should_fail) {
-          if (!XAck(redis_fd, stream, group, message_id)) {
+          if (!XAck(redis_fd, source_stream, group, message_id)) {
             std::cerr << "xack failed for " << message_id << "\n";
           } else {
             std::cout << "delivered and acked id=" << message_id
@@ -544,7 +551,7 @@ int main() {
           } else {
             std::cout << "routed to dlq id=" << message_id << "\n";
           }
-          XAck(redis_fd, stream, group, message_id);
+          XAck(redis_fd, source_stream, group, message_id);
           continue;
         }
 
@@ -559,7 +566,7 @@ int main() {
           std::cerr << "failed to publish retry event id=" << message_id << "\n";
           continue;
         }
-        if (!XAck(redis_fd, stream, group, message_id)) {
+        if (!XAck(redis_fd, source_stream, group, message_id)) {
           std::cerr << "xack failed after retry publish id=" << message_id << "\n";
         } else {
           std::cout << "retry scheduled id=" << message_id

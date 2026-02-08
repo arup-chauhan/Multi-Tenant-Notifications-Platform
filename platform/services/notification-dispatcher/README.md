@@ -10,12 +10,13 @@ Responsibilities:
 Implemented stream behavior:
 
 1. Creates consumer group for main stream (`XGROUP CREATE ... MKSTREAM`)
-2. Reads messages with `XREADGROUP` and blocking poll
-3. ACKs successful deliveries (`XACK`)
-4. Sends transient failures to retry stream with incremented `retry_count`
-5. Sends exhausted retries to DLQ stream and ACKs original message
-6. Persists state transitions through `notification-storage` internal API
-7. Pushes successful delivery events to `notification-gateway` internal fan-out endpoint
+2. Creates consumer group for retry stream (`XGROUP CREATE ... MKSTREAM`)
+3. Reads main + retry streams with `XREADGROUP` and blocking poll
+4. ACKs successful deliveries (`XACK`) on the source stream
+5. Sends transient failures to retry stream with incremented `retry_count`
+6. Sends exhausted retries to DLQ stream and ACKs original source message
+7. Persists state transitions through `notification-storage` internal API
+8. Pushes successful delivery events to `notification-gateway` internal fan-out endpoint
 
 Environment variables:
 
