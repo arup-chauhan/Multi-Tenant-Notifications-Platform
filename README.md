@@ -414,6 +414,11 @@ The script executes:
 
 Environment overrides are documented in `platform/tests/e2e/README.md`.
 
+Auth note:
+
+1. Set `JWT_HS256_SECRET` to run smoke test in signed-token mode.
+2. Or pass a custom token with `E2E_BEARER_TOKEN`.
+
 ---
 
 ## Local Deployment

@@ -13,12 +13,18 @@ const tenantId = __ENV.E2E_TENANT_ID || "tenant-e2e";
 const userId = __ENV.E2E_USER_ID || "user-e2e";
 const channel = __ENV.E2E_CHANNEL || "alerts";
 const marker = __ENV.E2E_MARKER || "e2e-marker";
+const bearerToken = __ENV.E2E_BEARER_TOKEN || "";
 
 export default function () {
   let wsMessageSeen = false;
   let postAccepted = false;
 
-  const wsResponse = ws.connect(gatewayWsUrl, {}, function (socket) {
+  const wsHeaders: Record<string, string> = {};
+  if (bearerToken) {
+    wsHeaders.Authorization = `Bearer ${bearerToken}`;
+  }
+
+  const wsResponse = ws.connect(gatewayWsUrl, { headers: wsHeaders }, function (socket) {
     socket.on("open", () => {
       socket.send(JSON.stringify({ type: "subscribe", tenant_id: tenantId, channel }));
 
@@ -29,9 +35,11 @@ export default function () {
         content: `e2e-${marker}`,
       });
 
-      const response = http.post(`${gatewayHttpBase}/v1/notifications`, payload, {
-        headers: { "Content-Type": "application/json" },
-      });
+      const httpHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (bearerToken) {
+        httpHeaders.Authorization = `Bearer ${bearerToken}`;
+      }
+      const response = http.post(`${gatewayHttpBase}/v1/notifications`, payload, { headers: httpHeaders });
       postAccepted = response.status === 202;
 
       socket.setTimeout(() => {

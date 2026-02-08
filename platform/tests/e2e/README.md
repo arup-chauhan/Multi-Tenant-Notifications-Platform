@@ -21,3 +21,11 @@ Configurable environment variables:
 - `REDIS_STREAM_NAME`
 - `CASSANDRA_HOST` / `CASSANDRA_PORT` / `CASSANDRA_KEYSPACE`
 - `TENANT_ID` / `USER_ID` / `CHANNEL`
+- `JWT_HS256_SECRET` (optional; auto-generates signed bearer token for test)
+- `E2E_BEARER_TOKEN` (optional; explicit token override)
+
+Auth mode behavior:
+
+1. If `E2E_BEARER_TOKEN` is set, the test uses it for both HTTP and WebSocket.
+2. Else if `JWT_HS256_SECRET` is set, the test generates an HS256 token (`tenant_id` claim).
+3. Else test runs in dev fallback mode using payload `tenant_id`.

@@ -15,6 +15,8 @@ CASSANDRA_KEYSPACE="${CASSANDRA_KEYSPACE:-notification_platform}"
 TENANT_ID="${TENANT_ID:-tenant-e2e}"
 USER_ID="${USER_ID:-user-e2e}"
 CHANNEL="${CHANNEL:-alerts}"
+JWT_HS256_SECRET="${JWT_HS256_SECRET:-}"
+E2E_BEARER_TOKEN="${E2E_BEARER_TOKEN:-}"
 
 MARKER="smoke-$(date +%s)-$RANDOM"
 
@@ -30,6 +32,32 @@ require_cmd redis-cli
 require_cmd cqlsh
 require_cmd k6
 
+base64url_encode() {
+  printf '%s' "$1" | openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+
+build_hs256_jwt() {
+  local tenant_id="$1"
+  local user_id="$2"
+  local secret="$3"
+  local iat
+  iat="$(date +%s)"
+  local header payload header_b64 payload_b64 signing_input signature
+  header='{"alg":"HS256","typ":"JWT"}'
+  payload="{\"tenant_id\":\"$tenant_id\",\"sub\":\"$user_id\",\"iat\":$iat}"
+  header_b64="$(base64url_encode "$header")"
+  payload_b64="$(base64url_encode "$payload")"
+  signing_input="${header_b64}.${payload_b64}"
+  signature="$(printf '%s' "$signing_input" | openssl dgst -binary -sha256 -hmac "$secret" | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+  printf '%s.%s' "$signing_input" "$signature"
+}
+
+if [[ -z "$E2E_BEARER_TOKEN" && -n "$JWT_HS256_SECRET" ]]; then
+  require_cmd openssl
+  E2E_BEARER_TOKEN="$(build_hs256_jwt "$TENANT_ID" "$USER_ID" "$JWT_HS256_SECRET")"
+  echo "[e2e] generated HS256 bearer token for tenant=$TENANT_ID"
+fi
+
 echo "[e2e] checking service health endpoints"
 curl -fsS "$GATEWAY_HTTP_BASE/health" >/dev/null
 curl -fsS "http://127.0.0.1:8090/health" >/dev/null
@@ -43,6 +71,7 @@ k6 run \
   --env E2E_USER_ID="$USER_ID" \
   --env E2E_CHANNEL="$CHANNEL" \
   --env E2E_MARKER="$MARKER" \
+  --env E2E_BEARER_TOKEN="$E2E_BEARER_TOKEN" \
   "$ROOT_DIR/ws_delivery_e2e.ts"
 
 echo "[e2e] verifying stream entry in Redis"
