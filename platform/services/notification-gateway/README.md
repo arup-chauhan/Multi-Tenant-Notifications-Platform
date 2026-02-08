@@ -20,3 +20,10 @@ Environment variables:
 2. `REDIS_HOST` (default: `127.0.0.1`)
 3. `REDIS_PORT` (default: `6379`)
 4. `REDIS_STREAM_NAME` (default: `notifications_stream`)
+5. `JWT_HS256_SECRET` (default: empty)
+
+Auth behavior:
+
+1. If `Authorization: Bearer <jwt>` is present on `POST /v1/notifications`, token signature is verified using `HS256` with `JWT_HS256_SECRET`.
+2. Invalid bearer tokens are rejected with `401`.
+3. If bearer token is not present, `tenant_id` from payload is used as local/dev fallback.

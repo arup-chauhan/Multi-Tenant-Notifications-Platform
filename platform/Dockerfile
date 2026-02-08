@@ -2,7 +2,7 @@ FROM ubuntu:24.04 AS builder
 
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      build-essential cmake ca-certificates && \
+      build-essential cmake ca-certificates libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -15,7 +15,7 @@ RUN cmake -S platform -B platform/build && \
 FROM ubuntu:24.04 AS runtime
 ARG INSTALL_CASSANDRA_TOOLS=false
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libssl3 && \
     if [ "$INSTALL_CASSANDRA_TOOLS" = "true" ]; then \
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cassandra-tools; \
     fi && \

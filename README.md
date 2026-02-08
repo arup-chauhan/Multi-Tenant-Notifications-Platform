@@ -223,6 +223,7 @@ Partitioning and access are tenant-first to preserve isolation and predictable q
 ## Security and Tenant Isolation
 
 - JWT authentication on REST and WebSocket entry points
+- HS256 JWT signature validation on REST ingress (`POST /v1/notifications`)
 - Tenant-bound authorization for all operations
 - Payload validation and input sanitation
 - Per-tenant quotas and rate-limiting controls

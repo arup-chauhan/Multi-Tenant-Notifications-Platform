@@ -1,6 +1,8 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <openssl/crypto.h>
+#include <openssl/hmac.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -155,32 +157,90 @@ std::optional<std::string> Base64UrlDecode(const std::string& input) {
   return output;
 }
 
-std::optional<std::string> ExtractTenantFromJwt(
-    const std::unordered_map<std::string, std::string>& headers) {
+struct JwtTenantResult {
+  enum class Status { kNoToken, kValid, kInvalid };
+  Status status = Status::kNoToken;
+  std::optional<std::string> tenant_id;
+  std::string error;
+};
+
+bool IsAlgHs256(const std::string& header_json) {
+  auto alg = ExtractJsonStringField(header_json, "alg");
+  return alg.has_value() && alg.value() == "HS256";
+}
+
+bool VerifyJwtHs256Signature(const std::string& signing_input, const std::string& signature_b64url,
+                             const std::string& secret) {
+  if (secret.empty()) {
+    return false;
+  }
+  auto expected_sig = Base64UrlDecode(signature_b64url);
+  if (!expected_sig.has_value()) {
+    return false;
+  }
+
+  unsigned int digest_len = 0;
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  const unsigned char* hmac = HMAC(EVP_sha256(), secret.data(), static_cast<int>(secret.size()),
+                                   reinterpret_cast<const unsigned char*>(signing_input.data()),
+                                   signing_input.size(), digest, &digest_len);
+  if (hmac == nullptr || digest_len != expected_sig->size()) {
+    return false;
+  }
+  return CRYPTO_memcmp(digest, expected_sig->data(), digest_len) == 0;
+}
+
+JwtTenantResult ExtractTenantFromJwt(const std::unordered_map<std::string, std::string>& headers,
+                                     const std::string& jwt_hs256_secret) {
   auto token = ExtractBearerToken(headers);
   if (!token.has_value()) {
-    return std::nullopt;
+    return JwtTenantResult{};
   }
 
   size_t first_dot = token->find('.');
-  if (first_dot == std::string::npos) {
-    return std::nullopt;
+  if (first_dot == std::string::npos || first_dot == 0) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "invalid JWT format"};
   }
   size_t second_dot = token->find('.', first_dot + 1);
-  if (second_dot == std::string::npos) {
-    return std::nullopt;
+  if (second_dot == std::string::npos || second_dot <= first_dot + 1 ||
+      second_dot + 1 >= token->size()) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "invalid JWT format"};
   }
 
-  auto payload = Base64UrlDecode(token->substr(first_dot + 1, second_dot - first_dot - 1));
+  const std::string header_segment = token->substr(0, first_dot);
+  const std::string payload_segment = token->substr(first_dot + 1, second_dot - first_dot - 1);
+  const std::string signature_segment = token->substr(second_dot + 1);
+
+  auto header = Base64UrlDecode(header_segment);
+  if (!header.has_value() || !IsAlgHs256(header.value())) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "unsupported JWT alg"};
+  }
+
+  const std::string signing_input = header_segment + "." + payload_segment;
+  if (!VerifyJwtHs256Signature(signing_input, signature_segment, jwt_hs256_secret)) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "invalid JWT signature"};
+  }
+
+  auto payload = Base64UrlDecode(payload_segment);
   if (!payload.has_value()) {
-    return std::nullopt;
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "invalid JWT payload"};
   }
 
   auto tenant = ExtractJsonStringField(payload.value(), "tenant_id");
   if (tenant.has_value()) {
-    return tenant;
+    return JwtTenantResult{JwtTenantResult::Status::kValid, tenant, ""};
   }
-  return ExtractJsonStringField(payload.value(), "tid");
+  tenant = ExtractJsonStringField(payload.value(), "tid");
+  if (tenant.has_value()) {
+    return JwtTenantResult{JwtTenantResult::Status::kValid, tenant, ""};
+  }
+  return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                         "tenant claim missing in JWT"};
 }
 
 bool SendAll(int fd, const std::string& data) {
@@ -683,7 +743,8 @@ int CreateServerSocket(int port) {
 }
 
 void HandleClientConnection(int client_fd, const std::string redis_host, const int redis_port,
-                            const std::string stream_name) {
+                            const std::string stream_name,
+                            const std::string jwt_hs256_secret) {
   HttpRequest req;
   if (!ReadHttpRequest(client_fd, req)) {
     WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"invalid request\"}");
@@ -736,8 +797,14 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   }
 
   std::string tenant_id;
-  if (auto from_token = ExtractTenantFromJwt(req.headers); from_token.has_value()) {
-    tenant_id = from_token.value();
+  const JwtTenantResult jwt_result = ExtractTenantFromJwt(req.headers, jwt_hs256_secret);
+  if (jwt_result.status == JwtTenantResult::Status::kValid && jwt_result.tenant_id.has_value()) {
+    tenant_id = jwt_result.tenant_id.value();
+  } else if (jwt_result.status == JwtTenantResult::Status::kInvalid) {
+    WriteHttpResponse(client_fd, 401, "Unauthorized",
+                      "{\"error\":\"invalid bearer token\"}");
+    close(client_fd);
+    return;
   } else if (auto from_body = ExtractJsonStringField(req.body, "tenant_id"); from_body.has_value()) {
     tenant_id = from_body.value();
   } else {
@@ -787,6 +854,8 @@ int main() {
   const std::string redis_host = std::getenv("REDIS_HOST") ? std::getenv("REDIS_HOST") : "127.0.0.1";
   const std::string stream_name =
       std::getenv("REDIS_STREAM_NAME") ? std::getenv("REDIS_STREAM_NAME") : "notifications_stream";
+  const std::string jwt_hs256_secret =
+      std::getenv("JWT_HS256_SECRET") ? std::getenv("JWT_HS256_SECRET") : "";
 
   int server_fd = CreateServerSocket(port);
   if (server_fd < 0) {
@@ -803,8 +872,8 @@ int main() {
       continue;
     }
 
-    std::thread([client_fd, redis_host, redis_port, stream_name]() {
-      HandleClientConnection(client_fd, redis_host, redis_port, stream_name);
+    std::thread([client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret]() {
+      HandleClientConnection(client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret);
     }).detach();
   }
 
