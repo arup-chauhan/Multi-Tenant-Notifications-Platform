@@ -1,0 +1,46 @@
+name: C++ Platform CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  e2e-and-load-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends redis-tools cassandra-tools curl gnupg ca-certificates
+
+      - name: Install k6
+        run: |
+          curl -fsSL https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | \
+            sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Start local stack
+        run: docker compose -f platform/infra/docker-compose.local.yml up --build -d
+
+      - name: Run end-to-end smoke
+        run: bash platform/tests/e2e/smoke_e2e.sh
+
+      - name: Run k6 HTTP smoke
+        run: k6 run platform/tests/load/k6/smoke_submit.ts
+
+      - name: Docker compose logs on failure
+        if: failure()
+        run: docker compose -f platform/infra/docker-compose.local.yml logs --no-color
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose -f platform/infra/docker-compose.local.yml down -v
