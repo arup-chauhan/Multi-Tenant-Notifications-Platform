@@ -27,3 +27,10 @@ Auth behavior:
 1. If `Authorization: Bearer <jwt>` is present on `POST /v1/notifications`, token signature is verified using `HS256` with `JWT_HS256_SECRET`.
 2. Invalid bearer tokens are rejected with `401`.
 3. If bearer token is not present, `tenant_id` from payload is used as local/dev fallback.
+
+WebSocket subscription behavior:
+
+1. Connect to `GET /ws`.
+2. Send text frame: `{"type":"subscribe","tenant_id":"<tenant>","channel":"<channel>"}`.
+3. Gateway delivers only messages matching the subscribed `tenant_id` and `channel`.
+4. If WS bearer JWT is present, subscription `tenant_id` must match token tenant.

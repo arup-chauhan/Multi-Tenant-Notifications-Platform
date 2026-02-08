@@ -189,6 +189,13 @@ curl -X POST http://localhost:8080/v1/notifications \
 
 - `GET /ws` - authenticated realtime channel
 - Supports tenant-bound subscriptions and server-side heartbeat handling
+- Client must send a subscribe frame after connect:
+
+```json
+{"type":"subscribe","tenant_id":"tenant-a","channel":"alerts"}
+```
+
+- Delivery fan-out is filtered by `tenant_id` + `channel` match
 
 ---
 

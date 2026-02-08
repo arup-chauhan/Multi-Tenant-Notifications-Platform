@@ -20,7 +20,7 @@ export default function () {
 
   const wsResponse = ws.connect(gatewayWsUrl, {}, function (socket) {
     socket.on("open", () => {
-      socket.send(JSON.stringify({ type: "subscribe", channel }));
+      socket.send(JSON.stringify({ type: "subscribe", tenant_id: tenantId, channel }));
 
       const payload = JSON.stringify({
         tenant_id: tenantId,

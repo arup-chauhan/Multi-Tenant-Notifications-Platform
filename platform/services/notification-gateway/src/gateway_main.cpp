@@ -35,6 +35,9 @@ struct HttpRequest {
 
 struct WebSocketClient {
   int fd = -1;
+  std::string auth_tenant_id;
+  std::string subscribed_tenant_id;
+  std::string subscribed_channel;
 };
 
 std::mutex g_ws_clients_mu;
@@ -645,6 +648,28 @@ std::shared_ptr<WebSocketClient> AddWebSocketClient(int fd) {
   return client;
 }
 
+void SetWebSocketAuthTenant(int fd, const std::string& tenant_id) {
+  std::lock_guard<std::mutex> lock(g_ws_clients_mu);
+  for (auto& client : g_ws_clients) {
+    if (client->fd == fd) {
+      client->auth_tenant_id = tenant_id;
+      return;
+    }
+  }
+}
+
+bool SetWebSocketSubscription(int fd, const std::string& tenant_id, const std::string& channel) {
+  std::lock_guard<std::mutex> lock(g_ws_clients_mu);
+  for (auto& client : g_ws_clients) {
+    if (client->fd == fd) {
+      client->subscribed_tenant_id = tenant_id;
+      client->subscribed_channel = channel;
+      return true;
+    }
+  }
+  return false;
+}
+
 void RemoveWebSocketClient(int fd) {
   std::lock_guard<std::mutex> lock(g_ws_clients_mu);
   g_ws_clients.erase(
@@ -653,30 +678,36 @@ void RemoveWebSocketClient(int fd) {
       g_ws_clients.end());
 }
 
-int BroadcastToWebSockets(const std::string& message) {
-  std::vector<std::shared_ptr<WebSocketClient>> snapshot;
+int BroadcastToWebSockets(const std::string& message, const std::string& tenant_id,
+                          const std::string& channel) {
+  std::vector<int> targets;
   {
     std::lock_guard<std::mutex> lock(g_ws_clients_mu);
-    snapshot = g_ws_clients;
+    for (const auto& client : g_ws_clients) {
+      if (client->fd < 0) {
+        continue;
+      }
+      if (client->subscribed_tenant_id != tenant_id || client->subscribed_channel != channel) {
+        continue;
+      }
+      targets.push_back(client->fd);
+    }
   }
 
   int delivered = 0;
-  for (const auto& client : snapshot) {
-    if (client->fd < 0) {
-      continue;
-    }
-    if (SendWebSocketFrame(client->fd, 0x1, message)) {
+  for (int client_fd : targets) {
+    if (SendWebSocketFrame(client_fd, 0x1, message)) {
       ++delivered;
       continue;
     }
-    RemoveWebSocketClient(client->fd);
-    close(client->fd);
-    client->fd = -1;
+    RemoveWebSocketClient(client_fd);
+    close(client_fd);
   }
   return delivered;
 }
 
-bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req) {
+bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req,
+                            const std::string& jwt_hs256_secret) {
   auto key_it = req.headers.find("sec-websocket-key");
   if (key_it == req.headers.end() || key_it->second.empty()) {
     return false;
@@ -697,6 +728,18 @@ bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req) {
   }
 
   auto ws_client = AddWebSocketClient(client_fd);
+  const JwtTenantResult ws_jwt = ExtractTenantFromJwt(req.headers, jwt_hs256_secret);
+  if (ws_jwt.status == JwtTenantResult::Status::kInvalid) {
+    SendWebSocketFrame(client_fd, 0x8, "");
+    RemoveWebSocketClient(client_fd);
+    close(client_fd);
+    ws_client->fd = -1;
+    return true;
+  }
+  if (ws_jwt.status == JwtTenantResult::Status::kValid && ws_jwt.tenant_id.has_value()) {
+    SetWebSocketAuthTenant(client_fd, ws_jwt.tenant_id.value());
+  }
+
   while (true) {
     uint8_t opcode = 0;
     std::string payload;
@@ -709,6 +752,24 @@ bool HandleWebSocketUpgrade(int client_fd, const HttpRequest& req) {
     }
     if (opcode == 0x9) {  // ping
       SendWebSocketFrame(client_fd, 0xA, payload);
+      continue;
+    }
+    if (opcode == 0x1) {  // text
+      auto type = ExtractJsonStringField(payload, "type");
+      if (!type.has_value() || type.value() != "subscribe") {
+        continue;
+      }
+
+      auto tenant = ExtractJsonStringField(payload, "tenant_id");
+      auto channel = ExtractJsonStringField(payload, "channel");
+      if (!tenant.has_value() || !channel.has_value() || tenant->empty() || channel->empty()) {
+        continue;
+      }
+      if (!ws_client->auth_tenant_id.empty() && ws_client->auth_tenant_id != tenant.value()) {
+        SendWebSocketFrame(client_fd, 0x8, "");
+        break;
+      }
+      SetWebSocketSubscription(client_fd, tenant.value(), channel.value());
     }
   }
 
@@ -761,7 +822,7 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   }
 
   if (req.method == "GET" && path == "/ws") {
-    if (!HandleWebSocketUpgrade(client_fd, req)) {
+    if (!HandleWebSocketUpgrade(client_fd, req, jwt_hs256_secret)) {
       WriteHttpResponse(client_fd, 400, "Bad Request",
                         "{\"error\":\"invalid websocket upgrade\"}");
       close(client_fd);
@@ -775,7 +836,9 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
       close(client_fd);
       return;
     }
-    const int delivered = BroadcastToWebSockets(req.body);
+    const std::string tenant_id = ExtractJsonStringField(req.body, "tenant_id").value_or("");
+    const std::string channel = ExtractJsonStringField(req.body, "channel").value_or("");
+    const int delivered = BroadcastToWebSockets(req.body, tenant_id, channel);
     std::ostringstream body;
     body << "{\"status\":\"broadcasted\",\"clients\":" << delivered << "}";
     WriteHttpResponse(client_fd, 202, "Accepted", body.str());

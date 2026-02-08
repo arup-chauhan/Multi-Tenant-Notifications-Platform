@@ -8,9 +8,10 @@ export const options = {
 
 export default function () {
   const url = "ws://localhost:8080/ws";
+  const tenantId = `tenant-${__VU % 5}`;
   const response = ws.connect(url, {}, function (socket) {
     socket.on("open", () => {
-      socket.send(JSON.stringify({ type: "subscribe", channel: "alerts" }));
+      socket.send(JSON.stringify({ type: "subscribe", tenant_id: tenantId, channel: "alerts" }));
     });
     socket.on("message", () => {});
     socket.setTimeout(function () {

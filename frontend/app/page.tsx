@@ -49,6 +49,13 @@ export default function Page(): JSX.Element {
 
     ws.onopen = () => {
       setConnectionState("open");
+      ws.send(
+        JSON.stringify({
+          type: "subscribe",
+          tenant_id: tenantId,
+          channel
+        })
+      );
       setMessages((prev) => [`[system] websocket connected to ${wsBase}`, ...prev]);
     };
 
