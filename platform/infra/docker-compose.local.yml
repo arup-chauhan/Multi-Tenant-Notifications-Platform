@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   redis:
     image: redis:7-alpine
@@ -11,6 +9,69 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  notification-storage:
+    build:
+      context: ../..
+      dockerfile: platform/Dockerfile
+      args:
+        SERVICE_TARGET: notification_storage
+    container_name: mtnp-storage
+    environment:
+      - STORAGE_PORT=8090
+      - STORAGE_DATA_FILE=/data/notification_storage.log
+    ports:
+      - "8090:8090"
+    volumes:
+      - storage_data:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  notification-dispatcher:
+    build:
+      context: ../..
+      dockerfile: platform/Dockerfile
+      args:
+        SERVICE_TARGET: notification_dispatcher
+    container_name: mtnp-dispatcher
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_STREAM_NAME=notifications_stream
+      - REDIS_RETRY_STREAM_NAME=notifications_retry_stream
+      - REDIS_DLQ_STREAM_NAME=notifications_dlq_stream
+      - DISPATCHER_GROUP=notification_dispatcher_group
+      - DISPATCHER_CONSUMER=dispatcher-1
+      - DISPATCHER_BLOCK_MS=5000
+      - DISPATCHER_MAX_RETRIES=3
+      - STORAGE_HOST=notification-storage
+      - STORAGE_PORT=8090
+    depends_on:
+      redis:
+        condition: service_healthy
+      notification-storage:
+        condition: service_started
+
+  notification-gateway:
+    build:
+      context: ../..
+      dockerfile: platform/Dockerfile
+      args:
+        SERVICE_TARGET: notification_gateway
+    container_name: mtnp-gateway
+    environment:
+      - GATEWAY_PORT=8080
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_STREAM_NAME=notifications_stream
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      notification-dispatcher:
+        condition: service_started
 
   cassandra:
     image: cassandra:5.0
@@ -24,3 +85,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
+
+volumes:
+  storage_data:

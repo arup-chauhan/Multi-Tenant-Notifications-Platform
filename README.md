@@ -292,12 +292,14 @@ Build and run:
 ```bash
 cd platform/infra
 docker compose -f docker-compose.local.yml up -d
-
-cd ../..
-cd platform
-cmake -S . -B build
-cmake --build build
 ```
+
+This starts:
+
+1. `notification-gateway` on `:8080`
+2. `notification-storage` on `:8090`
+3. `notification-dispatcher` worker
+4. Redis and Cassandra dependencies
 
 ---
 

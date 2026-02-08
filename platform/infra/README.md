@@ -5,5 +5,8 @@ This folder contains local infrastructure definitions for development and testin
 Runtime stack:
 
 1. Redis (Streams)
-2. Cassandra
-3. Prometheus + Grafana (deployment extension)
+2. Notification Storage service
+3. Notification Dispatcher service
+4. Notification Gateway service
+5. Cassandra
+6. Prometheus + Grafana (deployment extension)
