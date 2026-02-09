@@ -416,7 +416,7 @@ bash platform/tests/load/k6/run_local.sh
 Run via Docker network (no host port dependency):
 
 ```bash
-docker run --rm --network infra_default \
+docker run --rm --network multi-tenant-notification-platfrom_default \
   -v "$PWD/platform/tests/load/k6:/scripts" \
   grafana/k6 run \
   --summary-export=/scripts/results/steady_state_summary.json \

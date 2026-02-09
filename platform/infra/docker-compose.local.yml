@@ -1,3 +1,5 @@
+name: multi-tenant-notification-platfrom
+
 services:
   redis:
     image: redis:7-alpine

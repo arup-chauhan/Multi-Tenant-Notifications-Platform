@@ -7,7 +7,7 @@ Measured performance baselines for the MTNP stack.
 - Date: `2026-02-09T03:35:19Z`
 - Environment: `Codex workspace sandbox + Docker Desktop`
 - Stack: `platform/infra/docker-compose.local.yml` (gateway + dispatcher + storage + Redis + Cassandra)
-- Execution mode: Docker-network tests against `infra_default` / `mtnp-gateway:8080`
+- Execution mode: Docker-network tests against `multi-tenant-notification-platfrom_default` / `mtnp-gateway:8080`
 
 ## k6 Results (HTTP + WebSocket)
 
