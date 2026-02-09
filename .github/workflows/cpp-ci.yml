@@ -35,15 +35,17 @@ jobs:
         run: docker compose -f platform/infra/docker-compose.local.yml up --build -d
 
       - name: Run end-to-end smoke
-        run: bash platform/tests/e2e/smoke_e2e.sh
+        run: bash platform/tests/e2e/run_all.sh
 
       - name: Generate k6 bearer token
         id: k6_token
         run: |
           b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
           iat="$(date +%s)"
+          nbf="$((iat - 5))"
+          exp="$((iat + 300))"
           header='{"alg":"HS256","typ":"JWT"}'
-          payload='{"tenant_id":"tenant-demo","sub":"k6-smoke","iat":'"$iat"'}'
+          payload='{"tenant_id":"tenant-demo","sub":"k6-smoke","iat":'"$iat"',"nbf":'"$nbf"',"exp":'"$exp"'}'
           h="$(printf '%s' "$header" | b64url)"
           p="$(printf '%s' "$payload" | b64url)"
           s_input="${h}.${p}"

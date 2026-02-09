@@ -6,6 +6,8 @@ export const options = {
   duration: "5m",
 };
 
+const gatewayHttpBase = __ENV.GATEWAY_HTTP_BASE || "http://localhost:8080";
+
 export default function () {
   const payload = JSON.stringify({
     tenant_id: "tenant-a",
@@ -14,7 +16,7 @@ export default function () {
     content: "steady-state notification",
   });
 
-  const res = http.post("http://localhost:8080/v1/notifications", payload, {
+  const res = http.post(`${gatewayHttpBase}/v1/notifications`, payload, {
     headers: { "Content-Type": "application/json" },
   });
 

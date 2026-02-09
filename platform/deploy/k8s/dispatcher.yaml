@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-dispatcher
+  namespace: mtnp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: notification-dispatcher
+  template:
+    metadata:
+      labels:
+        app: notification-dispatcher
+    spec:
+      containers:
+        - name: dispatcher
+          image: mtnp-dispatcher:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8092
+          envFrom:
+            - configMapRef:
+                name: mtnp-config
+          env:
+            - name: GATEWAY_HOST
+              value: notification-gateway
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8092
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8092
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-dispatcher
+  namespace: mtnp
+spec:
+  selector:
+    app: notification-dispatcher
+  ports:
+    - name: metrics
+      port: 8092
+      targetPort: 8092

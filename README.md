@@ -23,6 +23,7 @@ A production-grade, event-driven notification platform for low-latency, reliable
 - [Local Deployment](#local-deployment)
 - [Frontend (Next.js + TypeScript)](#frontend-nextjs--typescript)
 - [Production Deployment](#production-deployment)
+- [Security Policy](#security-policy)
 - [Repository Layout](#repository-layout)
 
 ---
@@ -37,7 +38,7 @@ The platform is built around:
 - Redis Streams consumer groups for durable event routing
 - Cassandra for NoSQL persistence and tenant-partitioned query patterns
 - WebSocket delivery path for live notifications
-- Prometheus/Grafana/OpenTelemetry for production observability
+- Prometheus-compatible `/metrics` exposure and structured service logs
 
 ---
 
@@ -46,10 +47,11 @@ The platform is built around:
 - Tenant-scoped notification ingestion with policy enforcement
 - Reliable stream processing with retry, backoff, and DLQ routing
 - Real-time fan-out to active WebSocket sessions
-- Idempotent notification persistence and delivery state tracking
+- Deterministic notification state upserts and delivery history tracking
 - Per-tenant quotas, rate limiting, and operational controls
+- Configurable retention TTL for persisted delivery/state records
 - Replay workflows for dead-letter recovery
-- End-to-end metrics, tracing, and structured logs
+- End-to-end metrics, correlation tracing, and structured logs
 
 ---
 
@@ -72,7 +74,7 @@ flowchart LR
     D -->|Retry with backoff| RS
     D -->|Terminal failure| DLQ[(Dead Letter Stream)]
 
-    O[Prometheus + OTel + Logs] --- G
+    O[Prometheus + Correlation Tracing + Logs] --- G
     O --- D
     O --- S
 ```
@@ -82,7 +84,7 @@ Runtime layers:
 - Edge layer: Gateway API + WebSocket session manager
 - Processing layer: Dispatcher consumer workers + retry/DLQ logic
 - Data layer: Storage adapter + Cassandra data model
-- Control layer: Metrics, traces, health checks, and alerting
+- Control layer: Metrics, correlation tracing, health checks, and alerting
 
 ---
 
@@ -92,7 +94,8 @@ Coordination responsibilities in this architecture:
 
 - Redis Streams consumer groups coordinate worker ownership and pending-entry recovery.
 - Dispatcher workers manage retry scheduling and DLQ transitions.
-- Kubernetes/ECS orchestration manages service lifecycle, autoscaling, probes, and networking.
+- Kubernetes orchestration manages service lifecycle, probes, and networking.
+- Kubernetes HPA manifests provide CPU-based autoscaling for gateway and dispatcher.
 - Tenant policy controls enforce quota, rate, and retention boundaries during ingress and processing.
 
 Operationally, this separates event durability and worker coordination from compute orchestration.
@@ -115,7 +118,7 @@ Operationally, this separates event durability and worker coordination from comp
 
 - `storage`
   - Cassandra persistence interface
-  - Idempotent writes for notification records
+  - State upsert and append-only delivery history writes
   - Delivery status and tenant audit query operations
 
 ---
@@ -136,7 +139,7 @@ Operationally, this separates event durability and worker coordination from comp
 2. Gateway delivers to active tenant-authenticated WebSocket clients.
 3. On transient failure, dispatcher retries with backoff.
 4. On terminal failure, dispatcher moves event to DLQ.
-5. Delivery metrics and traces are emitted for observability.
+5. Delivery metrics and correlation traces are emitted for observability.
 
 ```mermaid
 sequenceDiagram
@@ -169,6 +172,8 @@ sequenceDiagram
 - `GET /v1/notifications/{id}` - fetch notification state
 - `GET /v1/tenants/{tenantId}/deliveries` - tenant delivery history
 - `GET /health` - liveness/readiness status
+- `GET /metrics` - Prometheus-compatible gateway metrics
+- `GET /metrics` on dispatcher (`:8092`) - stream processing metrics
 
 Example:
 
@@ -189,6 +194,7 @@ curl -X POST http://localhost:8080/v1/notifications \
 
 - `GET /ws` - authenticated realtime channel
 - Supports tenant-bound subscriptions and server-side heartbeat handling
+- Auth transport supports `Authorization: Bearer <token>` and query fallback `?access_token=<token>`
 - Client must send a subscribe frame after connect:
 
 ```json
@@ -205,10 +211,11 @@ Primary storage components:
 
 - Redis Streams for durable ingest and consumer-group processing
 - Cassandra for notification persistence and delivery-state records
+- Storage audit shadow file for local read APIs (`STORAGE_DATA_FILE`)
 
 Representative entities:
 
-- `notifications` (tenant_id, notification_id, payload, created_at)
+- `notification_state` (tenant_id, notification_id, user_id, channel, content, status, updated_ts)
 - `delivery_status` (tenant_id, notification_id, status_ts, user_id, channel, content, status, attempt, error)
 - `tenant_audit_log` (tenant_id, event_type, event_time, metadata)
 
@@ -218,12 +225,13 @@ Partitioning and access are tenant-first to preserve isolation and predictable q
 
 ## Reliability and Delivery Guarantees
 
-- At-least-once processing with idempotent writes
+- At-least-once processing with deterministic state upserts and append-only delivery history
 - Pending-entry recovery for consumer restarts
 - Exponential backoff retry strategy
 - Dead-letter routing for terminal failure states
-- Replay tooling for DLQ recovery workflows
+- Replay tooling for DLQ recovery workflows (`platform/tools/replay_dlq.sh`)
 - Backpressure controls for overload and slow consumers
+- Pending-entry recovery pass (`XREADGROUP ... 0`) before new stream reads
 
 ---
 
@@ -232,9 +240,11 @@ Partitioning and access are tenant-first to preserve isolation and predictable q
 - JWT authentication on REST and WebSocket entry points
 - HS256 JWT signature validation on REST ingress (`POST /v1/notifications`)
 - `GATEWAY_REQUIRE_AUTH=true` enforces bearer token requirement for HTTP and WebSocket entry
+- JWT time claim checks: `exp` required, `nbf`/`iat` validated with configurable skew
 - Tenant-bound authorization for all operations
 - Payload validation and input sanitation
 - Per-tenant quotas and rate-limiting controls
+- Daily tenant quota enforcement (`TENANT_DAILY_QUOTA`) with Redis counters
 - Structured audit trails for critical state transitions
 
 ```mermaid
@@ -252,18 +262,23 @@ flowchart TD
 
 Telemetry coverage:
 
-- Prometheus metrics for throughput, latency, retries, lag, and DLQ
-- OpenTelemetry traces across gateway -> dispatcher -> storage
-- Structured JSON logs with correlation and tenant identifiers
+- Prometheus-compatible gateway metrics (`GET /metrics`)
+- Prometheus-compatible dispatcher metrics (`GET /metrics` on `DISPATCHER_METRICS_PORT`)
+- Structured JSON logs for ingress and dispatch lifecycle events
+- Correlation-id propagation (`X-Correlation-Id`) across gateway, dispatcher, and storage records
+- Trace-id propagation (`x-trace-id` / `trace_id`) across stream, storage, and websocket delivery
 
 Primary metrics:
 
 - `notifications_ingested_total`
 - `notifications_delivered_total`
-- `delivery_latency_ms`
+- `dispatcher_events_consumed_total`
+- `dispatcher_events_retry_scheduled_total`
+- `dispatcher_events_dlq_total`
 - `stream_consumer_lag`
-- `retry_attempts_total`
-- `dlq_events_total`
+- `dispatcher_message_processing_duration_ms_sum`
+- `dispatcher_message_processing_duration_ms_count`
+- `notifications_backpressure_rejected_total`
 - `websocket_active_sessions`
 
 Service objectives:
@@ -276,7 +291,7 @@ Service objectives:
 
 ## Performance Profile
 
-Validated benchmark profile (k6 suites):
+Target benchmark profile (k6 suites):
 
 - Multi-tenant mixed notification traffic
 - Steady-state + burst scenarios
@@ -298,6 +313,11 @@ This project uses both `k6` and `wrk`:
 1. `k6` for HTTP + WebSocket scenario testing and scripting.
 2. `wrk` for high-throughput HTTP baseline and ingress saturation testing.
 3. Run both together with `platform/tests/load/run_all.sh`.
+
+For Docker-network execution (recommended in containerized local runs), target service DNS directly:
+
+- `GATEWAY_HTTP_BASE=http://mtnp-gateway:8080`
+- `GATEWAY_WS_URL=ws://mtnp-gateway:8080/ws`
 
 ### k6
 
@@ -344,6 +364,17 @@ Use the helper runner:
 bash platform/tests/load/k6/run_local.sh
 ```
 
+Run via Docker network (no host port dependency):
+
+```bash
+docker run --rm --network infra_default \
+  -v "$PWD/platform/tests/load/k6:/scripts" \
+  grafana/k6 run \
+  --summary-export=/scripts/results/steady_state_summary.json \
+  -e GATEWAY_HTTP_BASE=http://mtnp-gateway:8080 \
+  /scripts/steady_state.ts
+```
+
 Skip WebSocket scenarios when you only want HTTP:
 
 ```bash
@@ -388,6 +419,12 @@ BASE_URL=http://127.0.0.1:8080 DURATION=45s THREADS=8 CONNECTIONS=300 \
   bash platform/tests/load/wrk/run_local.sh
 ```
 
+Environment note:
+
+- In this sandbox, Docker `wrk` images were amd64-only and crashed under arm64 emulation.
+- Preferred path is native host `wrk` installation.
+- Fallback path is running `wrk` inside `mtnp-gateway` (where `wrk` is installed) and redirecting output files back to the repo.
+
 ---
 
 Run both suites in one command:
@@ -406,14 +443,21 @@ Run a single command to verify HTTP ingress, WebSocket delivery, Redis stream wr
 bash platform/tests/e2e/smoke_e2e.sh
 ```
 
+Run the full E2E suite:
+
+```bash
+bash platform/tests/e2e/run_all.sh
+```
+
 The script executes:
 
 1. Service health checks
 2. WebSocket + POST validation via `k6`
 3. Redis stream entry verification
 4. Cassandra `delivery_status` lookup validation
+5. Auth-negative checks (when `JWT_HS256_SECRET` is set)
 
-Environment overrides are documented in `platform/tests/e2e/README.md`.
+Environment overrides are documented in `platform/tests/README.md`.
 
 Auth note:
 
@@ -464,11 +508,13 @@ Default frontend URL:
 Environment file:
 
 1. `frontend/.env.example`
+2. Optional bearer token env: `NEXT_PUBLIC_GATEWAY_BEARER_TOKEN`
 
 Notes:
 
 1. Submit flow (`POST /v1/notifications`) is active with current gateway.
-2. Realtime feed uses `ws://localhost:8080/ws` and requires gateway WebSocket endpoint support.
+2. Frontend sends `Authorization: Bearer` automatically when `NEXT_PUBLIC_GATEWAY_BEARER_TOKEN` (or UI token input) is present.
+3. Realtime feed uses `ws://localhost:8080/ws`; when a token is provided, frontend appends it as `access_token` query for WebSocket auth fallback.
 
 ---
 
@@ -480,20 +526,34 @@ Supported production model:
 
 - Horizontal scale for gateway and dispatcher workers
 - Health probes and rolling updates
-- Policy-driven autoscaling based on lag/latency/session saturation
-- Centralized metrics, tracing, and log aggregation
+- CPU-based autoscaling (Kubernetes HPA)
+- Prometheus metrics, correlation tracing, and structured logs (aggregation-ready)
+
+Deployment artifacts:
+
+- Kubernetes manifests: `platform/deploy/k8s/`
+- Kubernetes HPA manifests: `platform/deploy/k8s/hpa.yaml`
+- Minikube image build helper: `platform/deploy/k8s/build-images-minikube.sh`
+- Benchmark result summary artifact: `platform/tests/load/results/benchmark-summary.md`
+
+---
+
+## Security Policy
+
+Security contract and hardening guidance:
+
+- `SECURITY.md`
 
 ---
 
 ## Repository Layout
 
-- `docs/system-architecture.md` - architecture reference
-- `docs/operations-runbook.md` - runtime and incident operations
 - `platform/common/` - shared contracts and utilities
 - `platform/services/notification-gateway/` - ingress and websocket edge service
 - `platform/services/notification-dispatcher/` - stream processing and delivery orchestration
 - `platform/services/notification-storage/` - persistence adapter and query operations
 - `platform/infra/` - local infrastructure definitions (Redis, Cassandra)
+- `platform/deploy/k8s/` - Kubernetes deployment manifests
 - `platform/tests/load/k6/` - load and reliability test suites
 - `platform/tests/load/wrk/` - HTTP throughput and ingress baseline tests
 - `platform/tests/e2e/` - end-to-end smoke verification scripts

@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace {
 
@@ -76,6 +77,48 @@ std::string ToLower(std::string s) {
   std::transform(s.begin(), s.end(), s.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return s;
+}
+
+std::string StripQuery(const std::string& path) {
+  size_t q = path.find('?');
+  if (q == std::string::npos) {
+    return path;
+  }
+  return path.substr(0, q);
+}
+
+std::optional<std::string> PathQueryParam(const std::string& path, const std::string& key) {
+  size_t q = path.find('?');
+  if (q == std::string::npos || q + 1 >= path.size()) {
+    return std::nullopt;
+  }
+  const std::string query = path.substr(q + 1);
+  size_t start = 0;
+  while (start < query.size()) {
+    size_t amp = query.find('&', start);
+    if (amp == std::string::npos) {
+      amp = query.size();
+    }
+    const std::string pair = query.substr(start, amp - start);
+    size_t eq = pair.find('=');
+    if (eq != std::string::npos) {
+      const std::string k = pair.substr(0, eq);
+      const std::string v = pair.substr(eq + 1);
+      if (k == key) {
+        return v;
+      }
+    }
+    start = amp + 1;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> PathSuffix(const std::string& path, const std::string& prefix) {
+  const std::string stripped = StripQuery(path);
+  if (stripped.rfind(prefix, 0) != 0 || stripped.size() <= prefix.size()) {
+    return std::nullopt;
+  }
+  return stripped.substr(prefix.size());
 }
 
 bool SendAll(int fd, const std::string& data) {
@@ -286,36 +329,165 @@ bool AppendRecordFile(const std::string& file_path, const std::string& payload) 
   return true;
 }
 
+std::vector<std::string> ReadAllLines(const std::string& file_path) {
+  std::vector<std::string> lines;
+  std::ifstream in(file_path);
+  if (!in.is_open()) {
+    return lines;
+  }
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty()) {
+      lines.push_back(line);
+    }
+  }
+  return lines;
+}
+
+bool BuildNotificationStateFromFile(const std::string& file_path, const std::string& tenant_id,
+                                    const std::string& notification_id, std::string& out_json) {
+  const auto lines = ReadAllLines(file_path);
+  for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+    const auto& line = *it;
+    const auto tenant = ExtractJsonStringField(line, "tenant_id");
+    const auto nid = ExtractJsonStringField(line, "notification_id");
+    if (!tenant.has_value() || !nid.has_value()) {
+      continue;
+    }
+    if (tenant.value() != tenant_id || nid.value() != notification_id) {
+      continue;
+    }
+    const auto user_id = ExtractJsonStringField(line, "user_id").value_or("unknown");
+    const auto correlation_id = ExtractJsonStringField(line, "correlation_id").value_or("");
+    const auto trace_id = ExtractJsonStringField(line, "trace_id").value_or("");
+    const auto channel = ExtractJsonStringField(line, "channel").value_or("default");
+    const auto content = ExtractJsonStringField(line, "content").value_or("");
+    const auto status = ExtractJsonStringField(line, "status").value_or("unknown");
+    const auto attempt = ExtractJsonNumberField(line, "attempt").value_or("0");
+    const auto error = ExtractJsonStringField(line, "error").value_or("");
+
+    std::ostringstream body;
+    body << "{"
+         << "\"tenant_id\":\"" << tenant.value() << "\","
+         << "\"notification_id\":\"" << nid.value() << "\","
+         << "\"user_id\":\"" << user_id << "\","
+         << "\"channel\":\"" << channel << "\","
+         << "\"content\":\"" << content << "\","
+         << "\"correlation_id\":\"" << correlation_id << "\","
+         << "\"trace_id\":\"" << trace_id << "\","
+         << "\"status\":\"" << status << "\","
+         << "\"attempt\":" << attempt << ","
+         << "\"error\":\"" << error << "\""
+         << "}";
+    out_json = body.str();
+    return true;
+  }
+  return false;
+}
+
+std::string BuildDeliveriesFromFile(const std::string& file_path, const std::string& tenant_id, int limit) {
+  const auto lines = ReadAllLines(file_path);
+  std::ostringstream out;
+  out << "{\"tenant_id\":\"" << tenant_id << "\",\"deliveries\":[";
+  int added = 0;
+  for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+    if (added >= limit) {
+      break;
+    }
+    const auto& line = *it;
+    const auto tenant = ExtractJsonStringField(line, "tenant_id");
+    if (!tenant.has_value() || tenant.value() != tenant_id) {
+      continue;
+    }
+    const auto nid = ExtractJsonStringField(line, "notification_id").value_or("");
+    const auto status = ExtractJsonStringField(line, "status").value_or("unknown");
+    const auto channel = ExtractJsonStringField(line, "channel").value_or("default");
+    const auto user_id = ExtractJsonStringField(line, "user_id").value_or("unknown");
+    const auto correlation_id = ExtractJsonStringField(line, "correlation_id").value_or("");
+    const auto trace_id = ExtractJsonStringField(line, "trace_id").value_or("");
+    const auto attempt = ExtractJsonNumberField(line, "attempt").value_or("0");
+    if (added > 0) {
+      out << ",";
+    }
+    out << "{"
+        << "\"notification_id\":\"" << nid << "\","
+        << "\"status\":\"" << status << "\","
+        << "\"channel\":\"" << channel << "\","
+        << "\"user_id\":\"" << user_id << "\","
+        << "\"correlation_id\":\"" << correlation_id << "\","
+        << "\"trace_id\":\"" << trace_id << "\","
+        << "\"attempt\":" << attempt
+        << "}";
+    ++added;
+  }
+  out << "]}";
+  return out.str();
+}
+
 bool PersistRecord(const std::string& backend,
                    const std::string& storage_file,
                    bool fallback_to_file,
                    const std::string& cassandra_host,
                    int cassandra_port,
                    const std::string& cassandra_keyspace,
+                   int record_ttl_seconds,
                    const std::string& body,
                    const std::string& tenant_id,
                    const std::string& notification_id,
                    const std::string& user_id,
                    const std::string& channel,
                    const std::string& content,
+                   const std::string& correlation_id,
+                   const std::string& trace_id,
                    const std::string& status,
                    const std::string& attempt,
                    const std::string& error) {
   if (backend == "cassandra") {
+    const std::string ttl_clause =
+        record_ttl_seconds > 0 ? (" USING TTL " + std::to_string(record_ttl_seconds)) : "";
     std::ostringstream cql;
     cql << "INSERT INTO " << cassandra_keyspace << ".delivery_status "
-        << "(tenant_id, notification_id, status_ts, user_id, channel, content, status, attempt, error) VALUES ("
+        << "(tenant_id, notification_id, status_ts, user_id, channel, content, correlation_id, trace_id, status, attempt, error) VALUES ("
         << "'" << EscapeForCql(tenant_id) << "',"
         << "'" << EscapeForCql(notification_id) << "',"
         << "toTimestamp(now()),"
         << "'" << EscapeForCql(user_id) << "',"
         << "'" << EscapeForCql(channel) << "',"
         << "'" << EscapeForCql(content) << "',"
+        << "'" << EscapeForCql(correlation_id) << "',"
+        << "'" << EscapeForCql(trace_id) << "',"
         << "'" << EscapeForCql(status) << "',"
         << attempt << ","
-        << "'" << EscapeForCql(error) << "');\n";
+        << "'" << EscapeForCql(error) << "')"
+        << ttl_clause << ";\n";
+    cql << "INSERT INTO " << cassandra_keyspace << ".notification_state "
+        << "(tenant_id, notification_id, updated_ts, user_id, channel, content, correlation_id, trace_id, status, attempt, error) VALUES ("
+        << "'" << EscapeForCql(tenant_id) << "',"
+        << "'" << EscapeForCql(notification_id) << "',"
+        << "toTimestamp(now()),"
+        << "'" << EscapeForCql(user_id) << "',"
+        << "'" << EscapeForCql(channel) << "',"
+        << "'" << EscapeForCql(content) << "',"
+        << "'" << EscapeForCql(correlation_id) << "',"
+        << "'" << EscapeForCql(trace_id) << "',"
+        << "'" << EscapeForCql(status) << "',"
+        << attempt << ","
+        << "'" << EscapeForCql(error) << "')"
+        << ttl_clause << ";\n";
+    cql << "INSERT INTO " << cassandra_keyspace << ".tenant_audit_log "
+        << "(tenant_id, event_time, event_type, notification_id, details) VALUES ("
+        << "'" << EscapeForCql(tenant_id) << "',"
+        << "toTimestamp(now()),"
+        << "'" << EscapeForCql(status) << "',"
+        << "'" << EscapeForCql(notification_id) << "',"
+        << "'" << EscapeForCql("channel=" + channel + ",attempt=" + attempt + ",error=" + error +
+                               ",correlation_id=" + correlation_id + ",trace_id=" + trace_id)
+        << "')"
+        << ttl_clause << ";\n";
 
     if (RunCql(cassandra_host, cassandra_port, cql.str())) {
+      // Keep a local append-only audit shadow for read APIs and debugging.
+      AppendRecordFile(storage_file, body);
       return true;
     }
     if (!fallback_to_file) {
@@ -354,13 +526,15 @@ int CreateServerSocket(int port) {
 int main() {
   const auto port_opt = ParseIntEnv("STORAGE_PORT", 8090);
   const auto cassandra_port_opt = ParseIntEnv("CASSANDRA_PORT", 9042);
-  if (!port_opt.has_value() || !cassandra_port_opt.has_value()) {
+  const auto record_ttl_opt = ParseIntEnv("STORAGE_RECORD_TTL_SECONDS", 0);
+  if (!port_opt.has_value() || !cassandra_port_opt.has_value() || !record_ttl_opt.has_value()) {
     std::cerr << "invalid numeric env\n";
     return 1;
   }
 
   const int port = port_opt.value();
   const int cassandra_port = cassandra_port_opt.value();
+  const int record_ttl_seconds = std::max(0, record_ttl_opt.value());
 
   const std::string storage_file = ParseStrEnv("STORAGE_DATA_FILE", "/tmp/notification_storage.log");
   const std::string backend = ToLower(ParseStrEnv("STORAGE_BACKEND", "cassandra"));
@@ -378,6 +552,7 @@ int main() {
             << " backend=" << backend
             << " cassandra=" << cassandra_host << ":" << cassandra_port
             << " keyspace=" << cassandra_keyspace
+            << " ttl_seconds=" << record_ttl_seconds
             << " fallback_to_file=" << (fallback_to_file ? "true" : "false") << "\n";
 
   while (true) {
@@ -395,13 +570,56 @@ int main() {
       continue;
     }
 
-    if (req.method == "GET" && req.path == "/health") {
+    const std::string path = StripQuery(req.path);
+    if (req.method == "GET" && path == "/health") {
       WriteHttpResponse(client_fd, 200, "OK", "{\"status\":\"ok\"}");
       close(client_fd);
       continue;
     }
 
-    if (req.method != "POST" || req.path != "/v1/internal/store") {
+    if (req.method == "GET") {
+      if (auto notification_id = PathSuffix(req.path, "/v1/internal/notifications/"); notification_id.has_value()) {
+        auto tenant = PathQueryParam(req.path, "tenant_id");
+        if (!tenant.has_value() || tenant->empty()) {
+          WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"tenant_id query param is required\"}");
+          close(client_fd);
+          continue;
+        }
+        std::string body;
+        if (!BuildNotificationStateFromFile(storage_file, tenant.value(), notification_id.value(), body)) {
+          WriteHttpResponse(client_fd, 404, "Not Found", "{\"error\":\"notification not found\"}");
+          close(client_fd);
+          continue;
+        }
+        WriteHttpResponse(client_fd, 200, "OK", body);
+        close(client_fd);
+        continue;
+      }
+
+      if (auto tenant = PathSuffix(req.path, "/v1/internal/tenants/"); tenant.has_value()) {
+        const std::string tenant_path = tenant.value();
+        const std::string deliveries_suffix = "/deliveries";
+        if (tenant_path.size() > deliveries_suffix.size() &&
+            tenant_path.substr(tenant_path.size() - deliveries_suffix.size()) == deliveries_suffix) {
+          const std::string tenant_id =
+              tenant_path.substr(0, tenant_path.size() - deliveries_suffix.size());
+          int limit = 50;
+          if (auto limit_q = PathQueryParam(req.path, "limit"); limit_q.has_value()) {
+            try {
+              limit = std::max(1, std::min(500, std::stoi(limit_q.value())));
+            } catch (...) {
+              limit = 50;
+            }
+          }
+          const std::string body = BuildDeliveriesFromFile(storage_file, tenant_id, limit);
+          WriteHttpResponse(client_fd, 200, "OK", body);
+          close(client_fd);
+          continue;
+        }
+      }
+    }
+
+    if (req.method != "POST" || path != "/v1/internal/store") {
       WriteHttpResponse(client_fd, 404, "Not Found", "{\"error\":\"route not found\"}");
       close(client_fd);
       continue;
@@ -415,6 +633,8 @@ int main() {
     const auto status = ExtractJsonStringField(req.body, "status");
     const auto attempt = ExtractJsonNumberField(req.body, "attempt");
     const auto error = ExtractJsonStringField(req.body, "error");
+    const auto correlation_id = ExtractJsonStringField(req.body, "correlation_id");
+    const auto trace_id = ExtractJsonStringField(req.body, "trace_id");
 
     if (!tenant.has_value() || !status.has_value() || !notification_id.has_value()) {
       WriteHttpResponse(client_fd, 400, "Bad Request",
@@ -425,10 +645,12 @@ int main() {
 
     const std::string attempt_value = attempt.value_or("0");
     if (!PersistRecord(backend, storage_file, fallback_to_file,
-                       cassandra_host, cassandra_port, cassandra_keyspace,
+                       cassandra_host, cassandra_port, cassandra_keyspace, record_ttl_seconds,
                        req.body,
                        tenant.value(), notification_id.value(), user_id.value_or("unknown"),
                        channel.value_or("default"), content.value_or(""),
+                       correlation_id.value_or(""),
+                       trace_id.value_or(""),
                        status.value(), attempt_value, error.value_or(""))) {
       WriteHttpResponse(client_fd, 500, "Internal Server Error",
                         "{\"error\":\"failed to persist record\"}");

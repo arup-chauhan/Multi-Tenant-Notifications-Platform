@@ -1,0 +1,7 @@
+platform/build
+build
+cmake-build-*
+**/CMakeCache.txt
+**/CMakeFiles
+**/*.o
+**/*.obj

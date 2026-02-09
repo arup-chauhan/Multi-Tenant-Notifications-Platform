@@ -6,12 +6,14 @@ type ConnectionState = "connecting" | "open" | "closed" | "error";
 
 const httpBase = process.env.NEXT_PUBLIC_GATEWAY_HTTP_BASE ?? "http://localhost:8080";
 const wsBase = process.env.NEXT_PUBLIC_GATEWAY_WS_BASE ?? "ws://localhost:8080/ws";
+const defaultBearerToken = process.env.NEXT_PUBLIC_GATEWAY_BEARER_TOKEN ?? "";
 
 export default function Page(): JSX.Element {
   const [tenantId, setTenantId] = useState("tenant-a");
   const [userId, setUserId] = useState("u1");
   const [channel, setChannel] = useState("alerts");
   const [content, setContent] = useState("");
+  const [bearerToken, setBearerToken] = useState(defaultBearerToken);
   const [statusText, setStatusText] = useState("idle");
   const [connectionState, setConnectionState] = useState<ConnectionState>("closed");
   const [messages, setMessages] = useState<string[]>([]);
@@ -44,7 +46,13 @@ export default function Page(): JSX.Element {
     }
 
     setConnectionState("connecting");
-    const ws = new WebSocket(wsBase);
+    const wsUrl =
+      bearerToken.trim().length > 0
+        ? `${wsBase}${wsBase.includes("?") ? "&" : "?"}access_token=${encodeURIComponent(
+            bearerToken.trim()
+          )}`
+        : wsBase;
+    const ws = new WebSocket(wsUrl);
     socketRef.current = ws;
 
     ws.onopen = () => {
@@ -88,7 +96,10 @@ export default function Page(): JSX.Element {
       const response = await fetch(`${httpBase}/v1/notifications`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
+          ...(bearerToken.trim().length > 0
+            ? { Authorization: `Bearer ${bearerToken.trim()}` }
+            : {})
         },
         body: JSON.stringify({
           tenant_id: tenantId,
@@ -131,6 +142,15 @@ export default function Page(): JSX.Element {
           <label>
             Channel
             <input value={channel} onChange={(e) => setChannel(e.target.value)} required />
+          </label>
+
+          <label>
+            Bearer Token (optional unless gateway auth is enabled)
+            <input
+              value={bearerToken}
+              onChange={(e) => setBearerToken(e.target.value)}
+              placeholder="eyJ..."
+            />
           </label>
 
           <label>

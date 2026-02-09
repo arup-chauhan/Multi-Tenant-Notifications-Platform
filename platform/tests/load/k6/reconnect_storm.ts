@@ -6,8 +6,10 @@ export const options = {
   duration: "90s",
 };
 
+const gatewayWsUrl = __ENV.GATEWAY_WS_URL || "ws://localhost:8080/ws";
+
 export default function () {
-  ws.connect("ws://localhost:8080/ws", {}, function (socket) {
+  ws.connect(gatewayWsUrl, {}, function (socket) {
     socket.setTimeout(function () {
       socket.close();
     }, 2000);

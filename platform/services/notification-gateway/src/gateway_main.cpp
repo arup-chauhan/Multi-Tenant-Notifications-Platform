@@ -8,11 +8,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cstdint>
+#include <ctime>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -43,6 +46,21 @@ struct WebSocketClient {
 std::mutex g_ws_clients_mu;
 std::vector<std::shared_ptr<WebSocketClient>> g_ws_clients;
 
+std::atomic<long long> g_requests_total{0};
+std::atomic<long long> g_notifications_accepted_total{0};
+std::atomic<long long> g_notifications_rejected_total{0};
+std::atomic<long long> g_rate_limited_total{0};
+std::atomic<long long> g_backpressure_rejected_total{0};
+std::atomic<long long> g_notifications_delivered_total{0};
+std::atomic<long long> g_correlation_seq{0};
+
+struct TenantRateWindow {
+  long long minute_epoch = 0;
+  int count = 0;
+};
+std::mutex g_tenant_rate_mu;
+std::unordered_map<std::string, TenantRateWindow> g_tenant_rate_windows;
+
 std::string ToLower(std::string input) {
   std::transform(input.begin(), input.end(), input.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -67,6 +85,36 @@ std::string StripQuery(const std::string& path) {
     return path;
   }
   return path.substr(0, q);
+}
+
+std::optional<std::string> PathQueryParam(const std::string& path, const std::string& key) {
+  size_t q = path.find('?');
+  if (q == std::string::npos || q + 1 >= path.size()) {
+    return std::nullopt;
+  }
+  const std::string query = path.substr(q + 1);
+  size_t start = 0;
+  while (start < query.size()) {
+    size_t amp = query.find('&', start);
+    if (amp == std::string::npos) {
+      amp = query.size();
+    }
+    const std::string pair = query.substr(start, amp - start);
+    size_t eq = pair.find('=');
+    if (eq != std::string::npos && pair.substr(0, eq) == key) {
+      return pair.substr(eq + 1);
+    }
+    start = amp + 1;
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> PathSuffix(const std::string& path, const std::string& prefix) {
+  const std::string stripped = StripQuery(path);
+  if (stripped.rfind(prefix, 0) != 0 || stripped.size() <= prefix.size()) {
+    return std::nullopt;
+  }
+  return stripped.substr(prefix.size());
 }
 
 std::optional<int> ParseIntEnv(const char* key, int fallback) {
@@ -121,6 +169,42 @@ std::optional<std::string> ExtractJsonStringField(const std::string& json,
     return std::nullopt;
   }
   return json.substr(first_quote + 1, second_quote - first_quote - 1);
+}
+
+std::optional<long long> ExtractJsonIntegerField(const std::string& json,
+                                                 const std::string& field) {
+  const std::string needle = "\"" + field + "\"";
+  size_t key = json.find(needle);
+  if (key == std::string::npos) {
+    return std::nullopt;
+  }
+  size_t colon = json.find(':', key + needle.size());
+  if (colon == std::string::npos) {
+    return std::nullopt;
+  }
+  size_t start = colon + 1;
+  while (start < json.size() && std::isspace(static_cast<unsigned char>(json[start]))) {
+    ++start;
+  }
+  if (start >= json.size()) {
+    return std::nullopt;
+  }
+
+  size_t end = start;
+  if (json[end] == '-' || json[end] == '+') {
+    ++end;
+  }
+  while (end < json.size() && std::isdigit(static_cast<unsigned char>(json[end]))) {
+    ++end;
+  }
+  if (end == start || (end == start + 1 && (json[start] == '-' || json[start] == '+'))) {
+    return std::nullopt;
+  }
+  try {
+    return std::stoll(json.substr(start, end - start));
+  } catch (...) {
+    return std::nullopt;
+  }
 }
 
 std::optional<std::string> ExtractBearerToken(
@@ -209,7 +293,8 @@ bool VerifyJwtHs256Signature(const std::string& signing_input, const std::string
 }
 
 JwtTenantResult ExtractTenantFromJwt(const std::unordered_map<std::string, std::string>& headers,
-                                     const std::string& jwt_hs256_secret) {
+                                     const std::string& jwt_hs256_secret,
+                                     long long jwt_clock_skew_seconds) {
   auto token = ExtractBearerToken(headers);
   if (!token.has_value()) {
     return JwtTenantResult{};
@@ -248,12 +333,36 @@ JwtTenantResult ExtractTenantFromJwt(const std::unordered_map<std::string, std::
     return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
                            "invalid JWT payload"};
   }
+  const std::string& payload_json = payload.value();
 
-  auto tenant = ExtractJsonStringField(payload.value(), "tenant_id");
+  const auto exp = ExtractJsonIntegerField(payload_json, "exp");
+  if (!exp.has_value()) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "missing exp claim"};
+  }
+  const long long now = static_cast<long long>(std::time(nullptr));
+  if (now > exp.value() + jwt_clock_skew_seconds) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "token expired"};
+  }
+
+  const auto nbf = ExtractJsonIntegerField(payload_json, "nbf");
+  if (nbf.has_value() && now + jwt_clock_skew_seconds < nbf.value()) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "token not yet valid"};
+  }
+
+  const auto iat = ExtractJsonIntegerField(payload_json, "iat");
+  if (iat.has_value() && now + jwt_clock_skew_seconds < iat.value()) {
+    return JwtTenantResult{JwtTenantResult::Status::kInvalid, std::nullopt,
+                           "token issued in the future"};
+  }
+
+  auto tenant = ExtractJsonStringField(payload_json, "tenant_id");
   if (tenant.has_value()) {
     return JwtTenantResult{JwtTenantResult::Status::kValid, tenant, ""};
   }
-  tenant = ExtractJsonStringField(payload.value(), "tid");
+  tenant = ExtractJsonStringField(payload_json, "tid");
   if (tenant.has_value()) {
     return JwtTenantResult{JwtTenantResult::Status::kValid, tenant, ""};
   }
@@ -271,6 +380,74 @@ bool SendAll(int fd, const std::string& data) {
     sent += static_cast<size_t>(n);
   }
   return true;
+}
+
+std::string JsonEscape(const std::string& input) {
+  std::string out;
+  out.reserve(input.size() + 16);
+  for (char c : input) {
+    switch (c) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        out.push_back(c);
+    }
+  }
+  return out;
+}
+
+void LogJsonEvent(const std::string& event, const std::string& outcome,
+                  const std::string& tenant_id, const std::string& correlation_id = "",
+                  const std::string& trace_id = "",
+                  const std::string& detail = "") {
+  std::ostringstream line;
+  line << "{\"ts\":" << static_cast<long long>(std::time(nullptr))
+       << ",\"service\":\"gateway\""
+       << ",\"event\":\"" << JsonEscape(event) << "\""
+       << ",\"outcome\":\"" << JsonEscape(outcome) << "\""
+       << ",\"tenant_id\":\"" << JsonEscape(tenant_id) << "\"";
+  if (!correlation_id.empty()) {
+    line << ",\"correlation_id\":\"" << JsonEscape(correlation_id) << "\"";
+  }
+  if (!trace_id.empty()) {
+    line << ",\"trace_id\":\"" << JsonEscape(trace_id) << "\"";
+  }
+  if (!detail.empty()) {
+    line << ",\"detail\":\"" << JsonEscape(detail) << "\"";
+  }
+  line << "}";
+  std::cout << line.str() << "\n";
+}
+
+std::string GenerateCorrelationId() {
+  std::ostringstream out;
+  out << "corr-" << static_cast<long long>(std::time(nullptr)) << "-"
+      << g_correlation_seq.fetch_add(1);
+  return out.str();
+}
+
+std::string GenerateTraceId() {
+  const auto now_ns = static_cast<unsigned long long>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+  const auto seq = static_cast<unsigned long long>(g_correlation_seq.fetch_add(1));
+  std::ostringstream out;
+  out << std::hex << std::setfill('0') << std::setw(16) << now_ns << std::setw(16) << seq;
+  return out.str();
 }
 
 bool ReadExact(int fd, std::string& out, size_t bytes) {
@@ -478,6 +655,176 @@ bool PublishToRedisStream(const std::string& host, int port, const std::string& 
   bool ok = SendAll(redis_fd, payload) && ReadRedisSimpleReply(redis_fd, reply);
   close(redis_fd);
   return ok;
+}
+
+std::optional<long long> ParseRedisIntegerReply(const std::string& reply) {
+  if (reply.empty() || reply[0] != ':') {
+    return std::nullopt;
+  }
+  try {
+    return std::stoll(reply.substr(1));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+bool ExceedsTenantDailyQuota(const std::string& redis_host, int redis_port,
+                             const std::string& tenant_id, int daily_quota,
+                             bool& out_exceeded, long long& out_current) {
+  out_exceeded = false;
+  out_current = 0;
+  if (daily_quota <= 0) {
+    return true;
+  }
+
+  const long long day_epoch = static_cast<long long>(std::time(nullptr) / 86400);
+  const std::string key = "quota:tenant:" + tenant_id + ":" + std::to_string(day_epoch);
+
+  int redis_fd = ConnectTcp(redis_host, redis_port);
+  if (redis_fd < 0) {
+    return false;
+  }
+
+  std::string incr_reply;
+  if (!SendAll(redis_fd, RedisRespArray({"INCR", key})) ||
+      !ReadRedisSimpleReply(redis_fd, incr_reply)) {
+    close(redis_fd);
+    return false;
+  }
+  const auto current = ParseRedisIntegerReply(incr_reply);
+  if (!current.has_value()) {
+    close(redis_fd);
+    return false;
+  }
+  out_current = current.value();
+
+  if (current.value() == 1) {
+    std::string expire_reply;
+    // Expire in 2 days to avoid stale key buildup while preserving daily buckets.
+    SendAll(redis_fd, RedisRespArray({"EXPIRE", key, "172800"}));
+    ReadRedisSimpleReply(redis_fd, expire_reply);
+  }
+  close(redis_fd);
+
+  out_exceeded = current.value() > daily_quota;
+  return true;
+}
+
+bool GetRedisStreamLength(const std::string& redis_host, int redis_port, const std::string& stream,
+                          long long& out_length) {
+  out_length = 0;
+  int redis_fd = ConnectTcp(redis_host, redis_port);
+  if (redis_fd < 0) {
+    return false;
+  }
+  std::string reply;
+  if (!SendAll(redis_fd, RedisRespArray({"XLEN", stream})) ||
+      !ReadRedisSimpleReply(redis_fd, reply)) {
+    close(redis_fd);
+    return false;
+  }
+  close(redis_fd);
+  const auto value = ParseRedisIntegerReply(reply);
+  if (!value.has_value()) {
+    return false;
+  }
+  out_length = value.value();
+  return true;
+}
+
+bool HttpGet(const std::string& host, int port, const std::string& path, int& status_code,
+             std::string& response_body) {
+  int fd = ConnectTcp(host, port);
+  if (fd < 0) {
+    return false;
+  }
+
+  std::ostringstream req;
+  req << "GET " << path << " HTTP/1.1\r\n";
+  req << "Host: " << host << ":" << port << "\r\n";
+  req << "Connection: close\r\n\r\n";
+  if (!SendAll(fd, req.str())) {
+    close(fd);
+    return false;
+  }
+
+  std::string response;
+  char buf[1024];
+  while (true) {
+    ssize_t n = recv(fd, buf, sizeof(buf), 0);
+    if (n <= 0) {
+      break;
+    }
+    response.append(buf, static_cast<size_t>(n));
+    if (response.size() > 2 * 1024 * 1024) {
+      break;
+    }
+  }
+  close(fd);
+
+  const size_t status_end = response.find("\r\n");
+  if (status_end == std::string::npos) {
+    return false;
+  }
+  std::istringstream status_stream(response.substr(0, status_end));
+  std::string http_version;
+  if (!(status_stream >> http_version >> status_code)) {
+    return false;
+  }
+  const size_t body_pos = response.find("\r\n\r\n");
+  response_body = (body_pos == std::string::npos) ? "" : response.substr(body_pos + 4);
+  return true;
+}
+
+bool IsRateLimited(const std::string& tenant_id, int per_minute_limit) {
+  if (per_minute_limit <= 0) {
+    return false;
+  }
+  const long long minute = static_cast<long long>(std::time(nullptr) / 60);
+  std::lock_guard<std::mutex> lock(g_tenant_rate_mu);
+  auto& window = g_tenant_rate_windows[tenant_id];
+  if (window.minute_epoch != minute) {
+    window.minute_epoch = minute;
+    window.count = 0;
+  }
+  if (window.count >= per_minute_limit) {
+    return true;
+  }
+  ++window.count;
+  return false;
+}
+
+int ActiveWsSessions() {
+  std::lock_guard<std::mutex> lock(g_ws_clients_mu);
+  int active = 0;
+  for (const auto& client : g_ws_clients) {
+    if (client->fd >= 0) {
+      ++active;
+    }
+  }
+  return active;
+}
+
+std::string BuildPrometheusMetrics() {
+  std::ostringstream out;
+  out << "# TYPE gateway_requests_total counter\n";
+  out << "gateway_requests_total " << g_requests_total.load() << "\n";
+  out << "# TYPE notifications_accepted_total counter\n";
+  out << "notifications_accepted_total " << g_notifications_accepted_total.load() << "\n";
+  out << "# TYPE notifications_ingested_total counter\n";
+  out << "notifications_ingested_total " << g_notifications_accepted_total.load() << "\n";
+  out << "# TYPE notifications_rejected_total counter\n";
+  out << "notifications_rejected_total " << g_notifications_rejected_total.load() << "\n";
+  out << "# TYPE notifications_rate_limited_total counter\n";
+  out << "notifications_rate_limited_total " << g_rate_limited_total.load() << "\n";
+  out << "# TYPE notifications_backpressure_rejected_total counter\n";
+  out << "notifications_backpressure_rejected_total " << g_backpressure_rejected_total.load()
+      << "\n";
+  out << "# TYPE notifications_delivered_total counter\n";
+  out << "notifications_delivered_total " << g_notifications_delivered_total.load() << "\n";
+  out << "# TYPE websocket_active_sessions gauge\n";
+  out << "websocket_active_sessions " << ActiveWsSessions() << "\n";
+  return out.str();
 }
 
 // SHA1 and base64 are used to complete RFC6455 websocket handshake.
@@ -812,10 +1159,20 @@ int CreateServerSocket(int port) {
 
 void HandleClientConnection(int client_fd, const std::string redis_host, const int redis_port,
                             const std::string stream_name,
+                            const std::string retry_stream_name,
+                            const std::string storage_host,
+                            int storage_port,
                             const std::string jwt_hs256_secret,
-                            bool gateway_require_auth) {
+                            bool gateway_require_auth,
+                            long long jwt_clock_skew_seconds,
+                            int tenant_rate_limit_per_minute,
+                            int tenant_daily_quota,
+                            int max_stream_backlog,
+                            int max_retry_stream_backlog) {
+  g_requests_total.fetch_add(1);
   HttpRequest req;
   if (!ReadHttpRequest(client_fd, req)) {
+    g_notifications_rejected_total.fetch_add(1);
     WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"invalid request\"}");
     close(client_fd);
     return;
@@ -829,8 +1186,29 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     return;
   }
 
+  if (req.method == "GET" && path == "/metrics") {
+    const std::string body = BuildPrometheusMetrics();
+    std::ostringstream response;
+    response << "HTTP/1.1 200 OK\r\n";
+    response << "Content-Type: text/plain; version=0.0.4\r\n";
+    response << "Content-Length: " << body.size() << "\r\n";
+    response << "Connection: close\r\n\r\n";
+    response << body;
+    SendAll(client_fd, response.str());
+    close(client_fd);
+    return;
+  }
+
   if (req.method == "GET" && path == "/ws") {
-    const JwtTenantResult ws_jwt = ExtractTenantFromJwt(req.headers, jwt_hs256_secret);
+    auto ws_headers = req.headers;
+    if (ws_headers.find("authorization") == ws_headers.end()) {
+      if (auto token = PathQueryParam(req.path, "access_token"); token.has_value() &&
+                                                              !token->empty()) {
+        ws_headers["authorization"] = "Bearer " + token.value();
+      }
+    }
+    const JwtTenantResult ws_jwt =
+        ExtractTenantFromJwt(ws_headers, jwt_hs256_secret, jwt_clock_skew_seconds);
     if (ws_jwt.status == JwtTenantResult::Status::kInvalid) {
       WriteHttpResponse(client_fd, 401, "Unauthorized",
                         "{\"error\":\"invalid bearer token\"}");
@@ -852,6 +1230,99 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     return;
   }
 
+  if (req.method == "GET") {
+    if (auto notification_id = PathSuffix(req.path, "/v1/notifications/"); notification_id.has_value()) {
+      auto tenant_id = PathQueryParam(req.path, "tenant_id");
+      if (!tenant_id.has_value() || tenant_id->empty()) {
+        WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"tenant_id query param is required\"}");
+        close(client_fd);
+        return;
+      }
+      const JwtTenantResult jwt_result =
+          ExtractTenantFromJwt(req.headers, jwt_hs256_secret, jwt_clock_skew_seconds);
+      if (jwt_result.status == JwtTenantResult::Status::kInvalid) {
+        WriteHttpResponse(client_fd, 401, "Unauthorized",
+                          "{\"error\":\"invalid bearer token\"}");
+        close(client_fd);
+        return;
+      }
+      if (gateway_require_auth && jwt_result.status != JwtTenantResult::Status::kValid) {
+        WriteHttpResponse(client_fd, 401, "Unauthorized",
+                          "{\"error\":\"bearer token required\"}");
+        close(client_fd);
+        return;
+      }
+      if (jwt_result.status == JwtTenantResult::Status::kValid && jwt_result.tenant_id.has_value() &&
+          jwt_result.tenant_id.value() != tenant_id.value()) {
+        WriteHttpResponse(client_fd, 403, "Forbidden",
+                          "{\"error\":\"tenant access denied\"}");
+        close(client_fd);
+        return;
+      }
+      int status = 0;
+      std::string body;
+      const std::string storage_path =
+          "/v1/internal/notifications/" + notification_id.value() + "?tenant_id=" + tenant_id.value();
+      if (!HttpGet(storage_host, storage_port, storage_path, status, body)) {
+        g_notifications_rejected_total.fetch_add(1);
+        WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                          "{\"error\":\"failed to query storage\"}");
+        close(client_fd);
+        return;
+      }
+      WriteHttpResponse(client_fd, status, status == 200 ? "OK" : "Not Found",
+                        body.empty() ? "{\"error\":\"not found\"}" : body);
+      close(client_fd);
+      return;
+    }
+
+    if (auto tenant_id = PathSuffix(req.path, "/v1/tenants/"); tenant_id.has_value()) {
+      const std::string suffix = "/deliveries";
+      const std::string tenant_path = tenant_id.value();
+      if (tenant_path.size() > suffix.size() &&
+          tenant_path.substr(tenant_path.size() - suffix.size()) == suffix) {
+        const std::string tenant =
+            tenant_path.substr(0, tenant_path.size() - suffix.size());
+        const JwtTenantResult jwt_result =
+            ExtractTenantFromJwt(req.headers, jwt_hs256_secret, jwt_clock_skew_seconds);
+        if (jwt_result.status == JwtTenantResult::Status::kInvalid) {
+          WriteHttpResponse(client_fd, 401, "Unauthorized",
+                            "{\"error\":\"invalid bearer token\"}");
+          close(client_fd);
+          return;
+        }
+        if (gateway_require_auth && jwt_result.status != JwtTenantResult::Status::kValid) {
+          WriteHttpResponse(client_fd, 401, "Unauthorized",
+                            "{\"error\":\"bearer token required\"}");
+          close(client_fd);
+          return;
+        }
+        if (jwt_result.status == JwtTenantResult::Status::kValid && jwt_result.tenant_id.has_value() &&
+            jwt_result.tenant_id.value() != tenant) {
+          WriteHttpResponse(client_fd, 403, "Forbidden",
+                            "{\"error\":\"tenant access denied\"}");
+          close(client_fd);
+          return;
+        }
+        const std::string limit = PathQueryParam(req.path, "limit").value_or("50");
+        int status = 0;
+        std::string body;
+        const std::string storage_path =
+            "/v1/internal/tenants/" + tenant + "/deliveries?limit=" + limit;
+        if (!HttpGet(storage_host, storage_port, storage_path, status, body)) {
+          WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                            "{\"error\":\"failed to query storage\"}");
+          close(client_fd);
+          return;
+        }
+        WriteHttpResponse(client_fd, status, status == 200 ? "OK" : "Not Found",
+                          body.empty() ? "{\"error\":\"not found\"}" : body);
+        close(client_fd);
+        return;
+      }
+    }
+  }
+
   if (req.method == "POST" && path == "/v1/internal/deliver") {
     if (req.body.empty()) {
       WriteHttpResponse(client_fd, 400, "Bad Request", "{\"error\":\"body is required\"}");
@@ -860,7 +1331,24 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     }
     const std::string tenant_id = ExtractJsonStringField(req.body, "tenant_id").value_or("");
     const std::string channel = ExtractJsonStringField(req.body, "channel").value_or("");
+    std::string correlation_id = ExtractJsonStringField(req.body, "correlation_id").value_or("");
+    std::string trace_id = ExtractJsonStringField(req.body, "trace_id").value_or("");
+    if (correlation_id.empty()) {
+      auto it = req.headers.find("x-correlation-id");
+      if (it != req.headers.end()) {
+        correlation_id = it->second;
+      }
+    }
+    if (trace_id.empty()) {
+      auto it = req.headers.find("x-trace-id");
+      if (it != req.headers.end()) {
+        trace_id = it->second;
+      }
+    }
     const int delivered = BroadcastToWebSockets(req.body, tenant_id, channel);
+    g_notifications_delivered_total.fetch_add(delivered);
+    LogJsonEvent("notification_delivered", "ok", tenant_id, correlation_id, trace_id,
+                 "clients=" + std::to_string(delivered));
     std::ostringstream body;
     body << "{\"status\":\"broadcasted\",\"clients\":" << delivered << "}";
     WriteHttpResponse(client_fd, 202, "Accepted", body.str());
@@ -882,7 +1370,8 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   }
 
   std::string tenant_id;
-  const JwtTenantResult jwt_result = ExtractTenantFromJwt(req.headers, jwt_hs256_secret);
+  const JwtTenantResult jwt_result =
+      ExtractTenantFromJwt(req.headers, jwt_hs256_secret, jwt_clock_skew_seconds);
   if (jwt_result.status == JwtTenantResult::Status::kValid && jwt_result.tenant_id.has_value()) {
     tenant_id = jwt_result.tenant_id.value();
   } else if (jwt_result.status == JwtTenantResult::Status::kInvalid) {
@@ -904,27 +1393,129 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     return;
   }
 
+  if (IsRateLimited(tenant_id, tenant_rate_limit_per_minute)) {
+    g_rate_limited_total.fetch_add(1);
+    g_notifications_rejected_total.fetch_add(1);
+    LogJsonEvent("notification_rejected", "rate_limited", tenant_id);
+    WriteHttpResponse(client_fd, 429, "Too Many Requests",
+                      "{\"error\":\"tenant rate limit exceeded\"}");
+    close(client_fd);
+    return;
+  }
+
+  bool daily_quota_exceeded = false;
+  long long daily_quota_current = 0;
+  if (!ExceedsTenantDailyQuota(redis_host, redis_port, tenant_id, tenant_daily_quota,
+                               daily_quota_exceeded, daily_quota_current)) {
+    g_notifications_rejected_total.fetch_add(1);
+    LogJsonEvent("notification_rejected", "quota_check_failed", tenant_id);
+    WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                      "{\"error\":\"failed to validate tenant quota\"}");
+    close(client_fd);
+    return;
+  }
+  if (daily_quota_exceeded) {
+    g_notifications_rejected_total.fetch_add(1);
+    LogJsonEvent("notification_rejected", "daily_quota_exceeded", tenant_id, "",
+                 "", "quota_count=" + std::to_string(daily_quota_current));
+    WriteHttpResponse(client_fd, 429, "Too Many Requests",
+                      "{\"error\":\"tenant daily quota exceeded\"}");
+    close(client_fd);
+    return;
+  }
+
+  if (max_stream_backlog > 0) {
+    long long stream_len = 0;
+    if (!GetRedisStreamLength(redis_host, redis_port, stream_name, stream_len)) {
+      g_notifications_rejected_total.fetch_add(1);
+      LogJsonEvent("notification_rejected", "backpressure_check_failed", tenant_id);
+      WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                        "{\"error\":\"failed to validate stream backlog\"}");
+      close(client_fd);
+      return;
+    }
+    if (stream_len >= max_stream_backlog) {
+      g_notifications_rejected_total.fetch_add(1);
+      g_backpressure_rejected_total.fetch_add(1);
+      LogJsonEvent("notification_rejected", "stream_backpressure", tenant_id, "", "",
+                   "stream=" + stream_name + ",length=" + std::to_string(stream_len));
+      WriteHttpResponse(client_fd, 429, "Too Many Requests",
+                        "{\"error\":\"ingress backpressure active\"}");
+      close(client_fd);
+      return;
+    }
+  }
+
+  if (max_retry_stream_backlog > 0) {
+    long long retry_stream_len = 0;
+    if (!GetRedisStreamLength(redis_host, redis_port, retry_stream_name, retry_stream_len)) {
+      g_notifications_rejected_total.fetch_add(1);
+      LogJsonEvent("notification_rejected", "retry_backpressure_check_failed", tenant_id);
+      WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                        "{\"error\":\"failed to validate retry stream backlog\"}");
+      close(client_fd);
+      return;
+    }
+    if (retry_stream_len >= max_retry_stream_backlog) {
+      g_notifications_rejected_total.fetch_add(1);
+      g_backpressure_rejected_total.fetch_add(1);
+      LogJsonEvent("notification_rejected", "retry_stream_backpressure", tenant_id, "", "",
+                   "stream=" + retry_stream_name + ",length=" +
+                       std::to_string(retry_stream_len));
+      WriteHttpResponse(client_fd, 429, "Too Many Requests",
+                        "{\"error\":\"retry backpressure active\"}");
+      close(client_fd);
+      return;
+    }
+  }
+
   const std::string user_id = ExtractJsonStringField(req.body, "user_id").value_or("unknown-user");
   const std::string channel = ExtractJsonStringField(req.body, "channel").value_or("default");
+  std::string correlation_id;
+  std::string trace_id;
+  if (auto it = req.headers.find("x-correlation-id"); it != req.headers.end()) {
+    correlation_id = it->second;
+  }
+  if (auto it = req.headers.find("x-trace-id"); it != req.headers.end()) {
+    trace_id = it->second;
+  }
+  if (auto from_body = ExtractJsonStringField(req.body, "trace_id"); from_body.has_value() &&
+      !from_body->empty()) {
+    trace_id = from_body.value();
+  }
+  if (correlation_id.empty()) {
+    correlation_id = GenerateCorrelationId();
+  }
+  if (trace_id.empty()) {
+    trace_id = GenerateTraceId();
+  }
 
   std::unordered_map<std::string, std::string> fields = {
       {"tenant_id", tenant_id},
       {"user_id", user_id},
       {"channel", channel},
       {"content", content.value()},
+      {"correlation_id", correlation_id},
+      {"trace_id", trace_id},
   };
 
   std::string redis_reply;
   if (!PublishToRedisStream(redis_host, redis_port, stream_name, fields, redis_reply)) {
+    g_notifications_rejected_total.fetch_add(1);
+    LogJsonEvent("notification_rejected", "redis_publish_failed", tenant_id, correlation_id, trace_id);
     WriteHttpResponse(client_fd, 503, "Service Unavailable",
                       "{\"error\":\"failed to publish to redis stream\"}");
     close(client_fd);
     return;
   }
 
+  g_notifications_accepted_total.fetch_add(1);
+  LogJsonEvent("notification_accepted", "ok", tenant_id, correlation_id, trace_id);
   std::ostringstream response;
   response << "{\"status\":\"accepted\",\"tenant_id\":\"" << tenant_id
-           << "\",\"stream\":\"" << stream_name << "\"}";
+           << "\",\"stream\":\"" << stream_name
+           << "\",\"correlation_id\":\"" << correlation_id
+           << "\",\"trace_id\":\"" << trace_id << "\"}";
   WriteHttpResponse(client_fd, 202, "Accepted", response.str());
   close(client_fd);
 }
@@ -942,11 +1533,48 @@ int main() {
   const int port = port_value.value();
   const int redis_port = redis_port_value.value();
   const std::string redis_host = std::getenv("REDIS_HOST") ? std::getenv("REDIS_HOST") : "127.0.0.1";
+  const std::string storage_host = std::getenv("STORAGE_HOST") ? std::getenv("STORAGE_HOST") : "127.0.0.1";
+  const auto storage_port_value = ParseIntEnv("STORAGE_PORT", 8090);
+  if (!storage_port_value.has_value()) {
+    std::cerr << "Invalid numeric environment value for STORAGE_PORT.\n";
+    return 1;
+  }
+  const int storage_port = storage_port_value.value();
   const std::string stream_name =
       std::getenv("REDIS_STREAM_NAME") ? std::getenv("REDIS_STREAM_NAME") : "notifications_stream";
+  const std::string retry_stream_name =
+      std::getenv("REDIS_RETRY_STREAM_NAME")
+          ? std::getenv("REDIS_RETRY_STREAM_NAME")
+          : "notifications_retry_stream";
   const std::string jwt_hs256_secret =
       std::getenv("JWT_HS256_SECRET") ? std::getenv("JWT_HS256_SECRET") : "";
   const bool gateway_require_auth = ParseBoolEnv("GATEWAY_REQUIRE_AUTH", false);
+  const auto jwt_clock_skew_seconds_value = ParseIntEnv("JWT_CLOCK_SKEW_SECONDS", 60);
+  if (!jwt_clock_skew_seconds_value.has_value()) {
+    std::cerr << "Invalid numeric environment value for JWT_CLOCK_SKEW_SECONDS.\n";
+    return 1;
+  }
+  const long long jwt_clock_skew_seconds = jwt_clock_skew_seconds_value.value();
+  const auto tenant_rate_limit_value = ParseIntEnv("TENANT_RATE_LIMIT_PER_MINUTE", 0);
+  if (!tenant_rate_limit_value.has_value()) {
+    std::cerr << "Invalid numeric environment value for TENANT_RATE_LIMIT_PER_MINUTE.\n";
+    return 1;
+  }
+  const int tenant_rate_limit_per_minute = tenant_rate_limit_value.value();
+  const auto tenant_daily_quota_value = ParseIntEnv("TENANT_DAILY_QUOTA", 0);
+  if (!tenant_daily_quota_value.has_value()) {
+    std::cerr << "Invalid numeric environment value for TENANT_DAILY_QUOTA.\n";
+    return 1;
+  }
+  const int tenant_daily_quota = tenant_daily_quota_value.value();
+  const auto max_stream_backlog_value = ParseIntEnv("GATEWAY_MAX_STREAM_BACKLOG", 0);
+  const auto max_retry_stream_backlog_value = ParseIntEnv("GATEWAY_MAX_RETRY_STREAM_BACKLOG", 0);
+  if (!max_stream_backlog_value.has_value() || !max_retry_stream_backlog_value.has_value()) {
+    std::cerr << "Invalid numeric environment value for stream backlog limits.\n";
+    return 1;
+  }
+  const int max_stream_backlog = max_stream_backlog_value.value();
+  const int max_retry_stream_backlog = max_retry_stream_backlog_value.value();
 
   int server_fd = CreateServerSocket(port);
   if (server_fd < 0) {
@@ -963,10 +1591,15 @@ int main() {
       continue;
     }
 
-    std::thread([client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret,
-                 gateway_require_auth]() {
-      HandleClientConnection(client_fd, redis_host, redis_port, stream_name, jwt_hs256_secret,
-                             gateway_require_auth);
+    std::thread([client_fd, redis_host, redis_port, stream_name, retry_stream_name, storage_host,
+                 storage_port,
+                 jwt_hs256_secret, gateway_require_auth, jwt_clock_skew_seconds,
+                 tenant_rate_limit_per_minute, tenant_daily_quota, max_stream_backlog,
+                 max_retry_stream_backlog]() {
+      HandleClientConnection(client_fd, redis_host, redis_port, stream_name, retry_stream_name,
+                             storage_host, storage_port, jwt_hs256_secret, gateway_require_auth,
+                             jwt_clock_skew_seconds, tenant_rate_limit_per_minute,
+                             tenant_daily_quota, max_stream_backlog, max_retry_stream_backlog);
     }).detach();
   }
 

@@ -9,6 +9,8 @@ export const options = {
   ],
 };
 
+const gatewayHttpBase = __ENV.GATEWAY_HTTP_BASE || "http://localhost:8080";
+
 export default function () {
   const payload = JSON.stringify({
     tenant_id: "tenant-b",
@@ -17,7 +19,7 @@ export default function () {
     content: "burst traffic notification",
   });
 
-  const res = http.post("http://localhost:8080/v1/notifications", payload, {
+  const res = http.post(`${gatewayHttpBase}/v1/notifications`, payload, {
     headers: { "Content-Type": "application/json" },
   });
 

@@ -6,10 +6,11 @@ export const options = {
   duration: "2m",
 };
 
+const gatewayWsUrl = __ENV.GATEWAY_WS_URL || "ws://localhost:8080/ws";
+
 export default function () {
-  const url = "ws://localhost:8080/ws";
   const tenantId = `tenant-${__VU % 5}`;
-  const response = ws.connect(url, {}, function (socket) {
+  const response = ws.connect(gatewayWsUrl, {}, function (socket) {
     socket.on("open", () => {
       socket.send(JSON.stringify({ type: "subscribe", tenant_id: tenantId, channel: "alerts" }));
     });

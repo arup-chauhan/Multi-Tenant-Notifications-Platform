@@ -35,6 +35,7 @@ tmp/
 GAPS.md
 TODO.md
 walkthrough/
+docs/
 
 # Node
 node_modules/
