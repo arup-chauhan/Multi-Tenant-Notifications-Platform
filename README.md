@@ -271,6 +271,26 @@ Partitioning and access are tenant-first to preserve isolation and predictable q
 - Daily tenant quota enforcement (`TENANT_DAILY_QUOTA`) with Redis counters
 - Structured audit trails for critical state transitions
 
+Example tenant model:
+
+```json
+{
+  "tenant_a": {
+    "name": "Acme Corp",
+    "users": ["u1", "u2"],
+    "channels": ["alerts", "billing"]
+  },
+  "tenant_b": {
+    "name": "Globex",
+    "users": ["u9"],
+    "channels": ["alerts"]
+  }
+}
+```
+
+In this model, a notification tagged with `tenant_id: "tenant_a"` is only processed, queried, and
+delivered within tenant-a boundaries.
+
 ```mermaid
 flowchart TD
     A[Incoming Request] --> B[JWT Validation]
