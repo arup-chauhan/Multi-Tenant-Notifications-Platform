@@ -1,6 +1,7 @@
 # Multi-Tenant Notification Platform
+An evolution of my earlier project of a notification system made in Go, MySQL, and Redis (Link: https://github.com/arup-chauhan/Realtime-Notification-System)
 
-A production-grade, event-driven notification platform for low-latency, reliable delivery across tenants. The system combines modern C++ services, Redis Streams, Cassandra persistence, WebSocket fan-out, and full observability for scale-ready operation.
+This is a production-grade, event-driven notification platform for low-latency, reliable delivery across tenants. The system combines modern C++ services, Redis Streams, Cassandra persistence, WebSocket fan-out, and full observability for scale-ready operation.
 
 ---
 
@@ -30,9 +31,7 @@ A production-grade, event-driven notification platform for low-latency, reliable
 
 ## Overview
 
-An evolution of my earlier project of a notification system made in Go, MySQL, and Redis (Link: https://github.com/arup-chauhan/Realtime-Notification-System)
-
-This Multi-Tenant Notification Platform is designed for real-time event delivery under mixed tenant workloads. It supports durable ingestion, controlled retries, dead-letter handling, and low-latency WebSocket delivery for active clients.
+This platform is designed for real-time event delivery under mixed tenant workloads. It supports durable ingestion, controlled retries, dead-letter handling, and low-latency WebSocket delivery for active clients.
 
 The platform is built around:
 
