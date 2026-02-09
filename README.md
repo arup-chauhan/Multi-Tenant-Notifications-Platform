@@ -358,6 +358,11 @@ k6 run --out json=platform/tests/load/k6/results/steady_state.json \
   platform/tests/load/k6/steady_state.ts
 ```
 
+Note:
+
+- `platform/tests/load/k6/results/steady_state.json` can be very large and is gitignored.
+- Use `steady_state_summary.json` for commit-friendly benchmark tracking.
+
 Use the helper runner:
 
 ```bash
@@ -463,6 +468,8 @@ Auth note:
 
 1. Set `JWT_HS256_SECRET` to run smoke test in signed-token mode.
 2. Or pass a custom token with `E2E_BEARER_TOKEN`.
+3. If your Redis stream has a very large historical backlog, move consumer-group cursor to latest
+   (`XGROUP SETID ... $`) before quick demo-only E2E runs.
 
 ---
 
