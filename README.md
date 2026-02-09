@@ -28,33 +28,11 @@ A production-grade, event-driven notification platform for low-latency, reliable
 
 ---
 
-## Fork / Clone / Run (Docker)
-
-Fork this repository on GitHub first, then clone your fork:
-
-```bash
-git clone https://github.com/<your-username>/Multi-Tenant-Notifications-Platform.git
-cd Multi-Tenant-Notifications-Platform
-```
-
-Start the local stack:
-
-```bash
-cd platform/infra
-docker compose -f docker-compose.local.yml up -d
-```
-
-Core endpoints:
-
-1. Gateway health: `http://localhost:8080/health`
-2. Storage health: `http://localhost:8090/health`
-3. Dispatcher metrics: `http://localhost:8092/metrics`
-
----
-
 ## Overview
 
-Multi-Tenant Notification Platform is designed for real-time event delivery under mixed tenant workloads. It supports durable ingestion, controlled retries, dead-letter handling, and low-latency WebSocket delivery for active clients.
+An evolution of my earlier project of a notification system made in Go, MySQL, and Redis (Link: https://github.com/arup-chauhan/Realtime-Notification-System)
+
+This Multi-Tenant Notification Platform is designed for real-time event delivery under mixed tenant workloads. It supports durable ingestion, controlled retries, dead-letter handling, and low-latency WebSocket delivery for active clients.
 
 The platform is built around:
 
