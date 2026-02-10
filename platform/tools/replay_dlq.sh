@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DLQ Replay Tool
+# Replays failed notifications from DLQ back to retry stream
+# Note: correlation_id is preserved (stable business ID)
+# New trace spans will be created automatically for replay operations
+
 REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 REDIS_DLQ_STREAM_NAME="${REDIS_DLQ_STREAM_NAME:-notifications_dlq_stream}"

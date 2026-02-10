@@ -411,7 +411,6 @@ std::string JsonEscape(const std::string& input) {
 
 void LogJsonEvent(const std::string& event, const std::string& outcome,
                   const std::string& tenant_id, const std::string& correlation_id = "",
-                  const std::string& trace_id = "",
                   const std::string& detail = "") {
   std::ostringstream line;
   line << "{\"ts\":" << static_cast<long long>(std::time(nullptr))
@@ -421,9 +420,6 @@ void LogJsonEvent(const std::string& event, const std::string& outcome,
        << ",\"tenant_id\":\"" << JsonEscape(tenant_id) << "\"";
   if (!correlation_id.empty()) {
     line << ",\"correlation_id\":\"" << JsonEscape(correlation_id) << "\"";
-  }
-  if (!trace_id.empty()) {
-    line << ",\"trace_id\":\"" << JsonEscape(trace_id) << "\"";
   }
   if (!detail.empty()) {
     line << ",\"detail\":\"" << JsonEscape(detail) << "\"";
@@ -436,17 +432,6 @@ std::string GenerateCorrelationId() {
   std::ostringstream out;
   out << "corr-" << static_cast<long long>(std::time(nullptr)) << "-"
       << g_correlation_seq.fetch_add(1);
-  return out.str();
-}
-
-std::string GenerateTraceId() {
-  const auto now_ns = static_cast<unsigned long long>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
-  const auto seq = static_cast<unsigned long long>(g_correlation_seq.fetch_add(1));
-  std::ostringstream out;
-  out << std::hex << std::setfill('0') << std::setw(16) << now_ns << std::setw(16) << seq;
   return out.str();
 }
 
@@ -1332,22 +1317,15 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     const std::string tenant_id = ExtractJsonStringField(req.body, "tenant_id").value_or("");
     const std::string channel = ExtractJsonStringField(req.body, "channel").value_or("");
     std::string correlation_id = ExtractJsonStringField(req.body, "correlation_id").value_or("");
-    std::string trace_id = ExtractJsonStringField(req.body, "trace_id").value_or("");
     if (correlation_id.empty()) {
       auto it = req.headers.find("x-correlation-id");
       if (it != req.headers.end()) {
         correlation_id = it->second;
       }
     }
-    if (trace_id.empty()) {
-      auto it = req.headers.find("x-trace-id");
-      if (it != req.headers.end()) {
-        trace_id = it->second;
-      }
-    }
     const int delivered = BroadcastToWebSockets(req.body, tenant_id, channel);
     g_notifications_delivered_total.fetch_add(delivered);
-    LogJsonEvent("notification_delivered", "ok", tenant_id, correlation_id, trace_id,
+    LogJsonEvent("notification_delivered", "ok", tenant_id, correlation_id,
                  "clients=" + std::to_string(delivered));
     std::ostringstream body;
     body << "{\"status\":\"broadcasted\",\"clients\":" << delivered << "}";
@@ -1417,7 +1395,7 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   if (daily_quota_exceeded) {
     g_notifications_rejected_total.fetch_add(1);
     LogJsonEvent("notification_rejected", "daily_quota_exceeded", tenant_id, "",
-                 "", "quota_count=" + std::to_string(daily_quota_current));
+                 "quota_count=" + std::to_string(daily_quota_current));
     WriteHttpResponse(client_fd, 429, "Too Many Requests",
                       "{\"error\":\"tenant daily quota exceeded\"}");
     close(client_fd);
@@ -1437,7 +1415,7 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     if (stream_len >= max_stream_backlog) {
       g_notifications_rejected_total.fetch_add(1);
       g_backpressure_rejected_total.fetch_add(1);
-      LogJsonEvent("notification_rejected", "stream_backpressure", tenant_id, "", "",
+      LogJsonEvent("notification_rejected", "stream_backpressure", tenant_id, "",
                    "stream=" + stream_name + ",length=" + std::to_string(stream_len));
       WriteHttpResponse(client_fd, 429, "Too Many Requests",
                         "{\"error\":\"ingress backpressure active\"}");
@@ -1459,7 +1437,7 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     if (retry_stream_len >= max_retry_stream_backlog) {
       g_notifications_rejected_total.fetch_add(1);
       g_backpressure_rejected_total.fetch_add(1);
-      LogJsonEvent("notification_rejected", "retry_stream_backpressure", tenant_id, "", "",
+      LogJsonEvent("notification_rejected", "retry_stream_backpressure", tenant_id, "",
                    "stream=" + retry_stream_name + ",length=" +
                        std::to_string(retry_stream_len));
       WriteHttpResponse(client_fd, 429, "Too Many Requests",
@@ -1472,22 +1450,18 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   const std::string user_id = ExtractJsonStringField(req.body, "user_id").value_or("unknown-user");
   const std::string channel = ExtractJsonStringField(req.body, "channel").value_or("default");
   std::string correlation_id;
-  std::string trace_id;
+  // Check header first, then body, then generate if empty
   if (auto it = req.headers.find("x-correlation-id"); it != req.headers.end()) {
     correlation_id = it->second;
   }
-  if (auto it = req.headers.find("x-trace-id"); it != req.headers.end()) {
-    trace_id = it->second;
-  }
-  if (auto from_body = ExtractJsonStringField(req.body, "trace_id"); from_body.has_value() &&
-      !from_body->empty()) {
-    trace_id = from_body.value();
+  if (correlation_id.empty()) {
+    auto from_body = ExtractJsonStringField(req.body, "correlation_id");
+    if (from_body.has_value() && !from_body->empty()) {
+      correlation_id = from_body.value();
+    }
   }
   if (correlation_id.empty()) {
     correlation_id = GenerateCorrelationId();
-  }
-  if (trace_id.empty()) {
-    trace_id = GenerateTraceId();
   }
 
   std::unordered_map<std::string, std::string> fields = {
@@ -1496,13 +1470,12 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
       {"channel", channel},
       {"content", content.value()},
       {"correlation_id", correlation_id},
-      {"trace_id", trace_id},
   };
 
   std::string redis_reply;
   if (!PublishToRedisStream(redis_host, redis_port, stream_name, fields, redis_reply)) {
     g_notifications_rejected_total.fetch_add(1);
-    LogJsonEvent("notification_rejected", "redis_publish_failed", tenant_id, correlation_id, trace_id);
+    LogJsonEvent("notification_rejected", "redis_publish_failed", tenant_id, correlation_id);
     WriteHttpResponse(client_fd, 503, "Service Unavailable",
                       "{\"error\":\"failed to publish to redis stream\"}");
     close(client_fd);
@@ -1510,12 +1483,11 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
   }
 
   g_notifications_accepted_total.fetch_add(1);
-  LogJsonEvent("notification_accepted", "ok", tenant_id, correlation_id, trace_id);
+  LogJsonEvent("notification_accepted", "ok", tenant_id, correlation_id);
   std::ostringstream response;
   response << "{\"status\":\"accepted\",\"tenant_id\":\"" << tenant_id
            << "\",\"stream\":\"" << stream_name
-           << "\",\"correlation_id\":\"" << correlation_id
-           << "\",\"trace_id\":\"" << trace_id << "\"}";
+           << "\",\"correlation_id\":\"" << correlation_id << "\"}";
   WriteHttpResponse(client_fd, 202, "Accepted", response.str());
   close(client_fd);
 }

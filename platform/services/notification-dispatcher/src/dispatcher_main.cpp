@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+static_assert(__cplusplus >= 201703L, "C++17 or later is required");
+
 namespace {
 
 enum class RespType { kSimpleString, kError, kInteger, kBulkString, kArray, kNull };
@@ -427,7 +429,6 @@ void LogJsonEvent(const std::string& event, const std::string& outcome,
                   const std::string& tenant_id = "",
                   const std::string& notification_id = "",
                   const std::string& correlation_id = "",
-                  const std::string& trace_id = "",
                   const std::string& reason = "",
                   int retry_count = -1) {
   std::ostringstream line;
@@ -443,9 +444,6 @@ void LogJsonEvent(const std::string& event, const std::string& outcome,
   }
   if (!correlation_id.empty()) {
     line << ",\"correlation_id\":\"" << JsonEscape(correlation_id) << "\"";
-  }
-  if (!trace_id.empty()) {
-    line << ",\"trace_id\":\"" << JsonEscape(trace_id) << "\"";
   }
   if (!reason.empty()) {
     line << ",\"reason\":\"" << JsonEscape(reason) << "\"";
@@ -651,7 +649,6 @@ bool PersistToStorage(const std::string& storage_host, int storage_port,
   body << "\"channel\":\"" << JsonEscape(GetField(fields, "channel", "default")) << "\",";
   body << "\"content\":\"" << JsonEscape(GetField(fields, "content", "")) << "\",";
   body << "\"correlation_id\":\"" << JsonEscape(GetField(fields, "correlation_id", "")) << "\",";
-  body << "\"trace_id\":\"" << JsonEscape(GetField(fields, "trace_id", "")) << "\",";
   body << "\"status\":\"" << JsonEscape(status) << "\",";
   body << "\"attempt\":" << attempt << ",";
   body << "\"error\":\"" << JsonEscape(error_msg) << "\"";
@@ -674,7 +671,6 @@ bool PushToGatewayFeed(const std::string& gateway_host, int gateway_port,
   body << "\"user_id\":\"" << JsonEscape(GetField(fields, "user_id", "unknown")) << "\",";
   body << "\"channel\":\"" << JsonEscape(GetField(fields, "channel", "default")) << "\",";
   body << "\"correlation_id\":\"" << JsonEscape(GetField(fields, "correlation_id", "")) << "\",";
-  body << "\"trace_id\":\"" << JsonEscape(GetField(fields, "trace_id", "")) << "\",";
   body << "\"content\":\"" << JsonEscape(GetField(fields, "content", "")) << "\"";
   body << "}";
 
@@ -834,7 +830,6 @@ int main() {
         auto fields = FieldsFromResp(fields_value);
         const std::string tenant_id = GetField(fields, "tenant_id", "unknown");
         const std::string correlation_id = GetField(fields, "correlation_id", "");
-        const std::string trace_id = GetField(fields, "trace_id", "");
         const auto message_start = std::chrono::steady_clock::now();
         g_events_consumed_total.fetch_add(1);
 
@@ -864,7 +859,7 @@ int main() {
         std::string failure_reason = should_fail ? "simulated_failure" : "";
         if (should_fail) {
           LogJsonEvent("notification_dispatch", "simulated_failure", tenant_id, message_id,
-                       correlation_id, trace_id, failure_reason, retry_count);
+                       correlation_id, failure_reason, retry_count);
         }
 
         if (!PersistToStorage(storage_host, storage_port, message_id, fields, "received", retry_count,
@@ -900,7 +895,7 @@ int main() {
             std::cout << "delivered and acked id=" << message_id
                       << " tenant=" << tenant_id << "\n";
             LogJsonEvent("notification_dispatch", "delivered", tenant_id, message_id,
-                         correlation_id, trace_id, "", retry_count);
+                         correlation_id, "", retry_count);
           }
           const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now() - message_start);
@@ -925,7 +920,7 @@ int main() {
             g_events_dlq_total.fetch_add(1);
             std::cout << "routed to dlq id=" << message_id << "\n";
             LogJsonEvent("notification_dispatch", "dlq_routed", tenant_id, message_id,
-                         correlation_id, trace_id, fields["failure_reason"], retry_count + 1);
+                         correlation_id, fields["failure_reason"], retry_count + 1);
           }
           if (!XAck(redis_fd, source_stream, group, message_id)) {
             g_processing_errors_total.fetch_add(1);
@@ -965,7 +960,7 @@ int main() {
           std::cout << "retry scheduled id=" << message_id
                     << " retry_count=" << fields["retry_count"] << "\n";
           LogJsonEvent("notification_dispatch", "retry_scheduled", tenant_id, message_id,
-                       correlation_id, trace_id,
+                       correlation_id,
                        (failure_reason.empty() ? "delivery_failed" : failure_reason) +
                            std::string(",backoff_ms=") + std::to_string(backoff_ms),
                        retry_count + 1);

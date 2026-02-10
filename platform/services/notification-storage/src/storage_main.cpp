@@ -359,7 +359,6 @@ bool BuildNotificationStateFromFile(const std::string& file_path, const std::str
     }
     const auto user_id = ExtractJsonStringField(line, "user_id").value_or("unknown");
     const auto correlation_id = ExtractJsonStringField(line, "correlation_id").value_or("");
-    const auto trace_id = ExtractJsonStringField(line, "trace_id").value_or("");
     const auto channel = ExtractJsonStringField(line, "channel").value_or("default");
     const auto content = ExtractJsonStringField(line, "content").value_or("");
     const auto status = ExtractJsonStringField(line, "status").value_or("unknown");
@@ -374,7 +373,6 @@ bool BuildNotificationStateFromFile(const std::string& file_path, const std::str
          << "\"channel\":\"" << channel << "\","
          << "\"content\":\"" << content << "\","
          << "\"correlation_id\":\"" << correlation_id << "\","
-         << "\"trace_id\":\"" << trace_id << "\","
          << "\"status\":\"" << status << "\","
          << "\"attempt\":" << attempt << ","
          << "\"error\":\"" << error << "\""
@@ -404,7 +402,6 @@ std::string BuildDeliveriesFromFile(const std::string& file_path, const std::str
     const auto channel = ExtractJsonStringField(line, "channel").value_or("default");
     const auto user_id = ExtractJsonStringField(line, "user_id").value_or("unknown");
     const auto correlation_id = ExtractJsonStringField(line, "correlation_id").value_or("");
-    const auto trace_id = ExtractJsonStringField(line, "trace_id").value_or("");
     const auto attempt = ExtractJsonNumberField(line, "attempt").value_or("0");
     if (added > 0) {
       out << ",";
@@ -415,7 +412,6 @@ std::string BuildDeliveriesFromFile(const std::string& file_path, const std::str
         << "\"channel\":\"" << channel << "\","
         << "\"user_id\":\"" << user_id << "\","
         << "\"correlation_id\":\"" << correlation_id << "\","
-        << "\"trace_id\":\"" << trace_id << "\","
         << "\"attempt\":" << attempt
         << "}";
     ++added;
@@ -438,7 +434,6 @@ bool PersistRecord(const std::string& backend,
                    const std::string& channel,
                    const std::string& content,
                    const std::string& correlation_id,
-                   const std::string& trace_id,
                    const std::string& status,
                    const std::string& attempt,
                    const std::string& error) {
@@ -447,7 +442,7 @@ bool PersistRecord(const std::string& backend,
         record_ttl_seconds > 0 ? (" USING TTL " + std::to_string(record_ttl_seconds)) : "";
     std::ostringstream cql;
     cql << "INSERT INTO " << cassandra_keyspace << ".delivery_status "
-        << "(tenant_id, notification_id, status_ts, user_id, channel, content, correlation_id, trace_id, status, attempt, error) VALUES ("
+        << "(tenant_id, notification_id, status_ts, user_id, channel, content, correlation_id, status, attempt, error) VALUES ("
         << "'" << EscapeForCql(tenant_id) << "',"
         << "'" << EscapeForCql(notification_id) << "',"
         << "toTimestamp(now()),"
@@ -455,13 +450,12 @@ bool PersistRecord(const std::string& backend,
         << "'" << EscapeForCql(channel) << "',"
         << "'" << EscapeForCql(content) << "',"
         << "'" << EscapeForCql(correlation_id) << "',"
-        << "'" << EscapeForCql(trace_id) << "',"
         << "'" << EscapeForCql(status) << "',"
         << attempt << ","
         << "'" << EscapeForCql(error) << "')"
         << ttl_clause << ";\n";
     cql << "INSERT INTO " << cassandra_keyspace << ".notification_state "
-        << "(tenant_id, notification_id, updated_ts, user_id, channel, content, correlation_id, trace_id, status, attempt, error) VALUES ("
+        << "(tenant_id, notification_id, updated_ts, user_id, channel, content, correlation_id, status, attempt, error) VALUES ("
         << "'" << EscapeForCql(tenant_id) << "',"
         << "'" << EscapeForCql(notification_id) << "',"
         << "toTimestamp(now()),"
@@ -469,7 +463,6 @@ bool PersistRecord(const std::string& backend,
         << "'" << EscapeForCql(channel) << "',"
         << "'" << EscapeForCql(content) << "',"
         << "'" << EscapeForCql(correlation_id) << "',"
-        << "'" << EscapeForCql(trace_id) << "',"
         << "'" << EscapeForCql(status) << "',"
         << attempt << ","
         << "'" << EscapeForCql(error) << "')"
@@ -481,7 +474,7 @@ bool PersistRecord(const std::string& backend,
         << "'" << EscapeForCql(status) << "',"
         << "'" << EscapeForCql(notification_id) << "',"
         << "'" << EscapeForCql("channel=" + channel + ",attempt=" + attempt + ",error=" + error +
-                               ",correlation_id=" + correlation_id + ",trace_id=" + trace_id)
+                               ",correlation_id=" + correlation_id)
         << "')"
         << ttl_clause << ";\n";
 
@@ -634,7 +627,6 @@ int main() {
     const auto attempt = ExtractJsonNumberField(req.body, "attempt");
     const auto error = ExtractJsonStringField(req.body, "error");
     const auto correlation_id = ExtractJsonStringField(req.body, "correlation_id");
-    const auto trace_id = ExtractJsonStringField(req.body, "trace_id");
 
     if (!tenant.has_value() || !status.has_value() || !notification_id.has_value()) {
       WriteHttpResponse(client_fd, 400, "Bad Request",
@@ -650,7 +642,6 @@ int main() {
                        tenant.value(), notification_id.value(), user_id.value_or("unknown"),
                        channel.value_or("default"), content.value_or(""),
                        correlation_id.value_or(""),
-                       trace_id.value_or(""),
                        status.value(), attempt_value, error.value_or(""))) {
       WriteHttpResponse(client_fd, 500, "Internal Server Error",
                         "{\"error\":\"failed to persist record\"}");
