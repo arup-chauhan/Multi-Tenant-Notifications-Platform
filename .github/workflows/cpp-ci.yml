@@ -21,7 +21,14 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends redis-tools cassandra-tools curl gnupg ca-certificates
+          sudo apt-get install -y --no-install-recommends redis-tools curl gnupg ca-certificates
+
+          # Install Cassandra tools from Apache repository
+          curl -fsSL https://www.apache.org/dist/cassandra/KEYS | sudo gpg --dearmor -o /usr/share/keyrings/cassandra-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cassandra-archive-keyring.gpg] https://debian.cassandra.apache.org 41x main" | \
+            sudo tee /etc/apt/sources.list.d/cassandra.list
+          sudo apt-get update
+          sudo apt-get install -y cassandra-tools
 
       - name: Install k6
         run: |
