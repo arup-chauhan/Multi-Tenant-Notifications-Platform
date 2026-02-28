@@ -15,9 +15,9 @@ RUN cmake -S platform -B platform/build && \
 FROM ubuntu:24.04 AS runtime
 ARG INSTALL_CASSANDRA_TOOLS=false
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libssl3 && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libssl3 python3 python3-pip && \
     if [ "$INSTALL_CASSANDRA_TOOLS" = "true" ]; then \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cassandra-tools; \
+      pip3 install --break-system-packages --no-cache-dir cqlsh; \
     fi && \
     rm -rf /var/lib/apt/lists/*
 

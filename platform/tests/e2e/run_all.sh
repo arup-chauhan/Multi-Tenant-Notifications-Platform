@@ -6,6 +6,9 @@ ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 echo "[e2e] Running smoke path checks"
 bash "$ROOT_DIR/smoke_e2e.sh"
 
+echo "[e2e] Running idempotency checks"
+bash "$ROOT_DIR/idempotency_e2e.sh"
+
 if [[ -n "${JWT_HS256_SECRET:-}" ]]; then
   echo "[e2e] Running auth negative checks"
   bash "$ROOT_DIR/auth_negative_checks.sh"

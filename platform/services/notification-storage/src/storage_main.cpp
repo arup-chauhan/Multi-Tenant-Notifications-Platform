@@ -87,6 +87,34 @@ std::string StripQuery(const std::string& path) {
   return path.substr(0, q);
 }
 
+std::string JsonEscape(const std::string& value) {
+  std::string out;
+  out.reserve(value.size());
+  for (char c : value) {
+    switch (c) {
+      case '\\':
+        out += "\\\\";
+        break;
+      case '"':
+        out += "\\\"";
+        break;
+      case '\n':
+        out += "\\n";
+        break;
+      case '\r':
+        out += "\\r";
+        break;
+      case '\t':
+        out += "\\t";
+        break;
+      default:
+        out.push_back(c);
+        break;
+    }
+  }
+  return out;
+}
+
 std::optional<std::string> PathQueryParam(const std::string& path, const std::string& key) {
   size_t q = path.find('?');
   if (q == std::string::npos || q + 1 >= path.size()) {
@@ -317,6 +345,220 @@ bool RunCql(const std::string& cassandra_host, int cassandra_port, const std::st
   int rc = std::system(cmd.str().c_str());
   std::remove(file_template);
   return rc == 0;
+}
+
+bool RunCqlCapture(const std::string& cassandra_host, int cassandra_port, const std::string& cql,
+                   std::string& output) {
+  output.clear();
+
+  char file_template[] = "/tmp/storage-cql-capture-XXXXXX";
+  int fd = mkstemp(file_template);
+  if (fd < 0) {
+    return false;
+  }
+
+  {
+    std::ofstream temp(file_template);
+    if (!temp.is_open()) {
+      close(fd);
+      std::remove(file_template);
+      return false;
+    }
+    temp << cql;
+  }
+  close(fd);
+
+  std::ostringstream cmd;
+  cmd << "cqlsh " << cassandra_host << " " << cassandra_port << " -f " << file_template << " 2>&1";
+  FILE* pipe = popen(cmd.str().c_str(), "r");
+  if (pipe == nullptr) {
+    std::remove(file_template);
+    return false;
+  }
+
+  char buffer[4096];
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+    output += buffer;
+  }
+  const int rc = pclose(pipe);
+  std::remove(file_template);
+  return rc == 0;
+}
+
+std::vector<std::string> SplitLines(const std::string& input) {
+  std::vector<std::string> lines;
+  std::istringstream ss(input);
+  std::string line;
+  while (std::getline(ss, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+std::string StripEnclosingQuotes(const std::string& s) {
+  if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+    return s.substr(1, s.size() - 2);
+  }
+  return s;
+}
+
+bool ParseLwtApplied(const std::string& cql_output, bool& applied) {
+  const auto lines = SplitLines(cql_output);
+  for (const auto& raw : lines) {
+    const std::string line = Trim(raw);
+    if (line.empty() || line.find("[applied]") != std::string::npos) {
+      continue;
+    }
+    if (line.find("---") != std::string::npos || line.find('(') == 0) {
+      continue;
+    }
+    size_t pipe = line.find('|');
+    std::string first_col = pipe == std::string::npos ? line : Trim(line.substr(0, pipe));
+    first_col = ToLower(first_col);
+    if (first_col == "true") {
+      applied = true;
+      return true;
+    }
+    if (first_col == "false") {
+      applied = false;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::optional<std::string> ParseSingleColumnSelectValue(const std::string& cql_output) {
+  const auto lines = SplitLines(cql_output);
+  bool seen_separator = false;
+  for (const auto& raw : lines) {
+    const std::string line = Trim(raw);
+    if (line.empty()) {
+      continue;
+    }
+    if (!seen_separator) {
+      if (line.find("---") != std::string::npos) {
+        seen_separator = true;
+      }
+      continue;
+    }
+    if (line[0] == '(') {
+      break;
+    }
+    const std::string value = StripEnclosingQuotes(Trim(line));
+    if (!value.empty() && ToLower(value) != "null") {
+      return value;
+    }
+  }
+  return std::nullopt;
+}
+
+struct IdempotencyClaimResult {
+  bool success = false;
+  bool claimed = false;
+  std::string notification_id;
+  std::string error;
+};
+
+IdempotencyClaimResult ClaimIdempotencyKey(const std::string& backend,
+                                           const std::string& cassandra_host,
+                                           int cassandra_port,
+                                           const std::string& cassandra_keyspace,
+                                           const std::string& tenant_id,
+                                           const std::string& idempotency_key,
+                                           const std::string& notification_id) {
+  IdempotencyClaimResult result{};
+
+  if (backend != "cassandra") {
+    result.error = "idempotency claim requires cassandra backend";
+    return result;
+  }
+
+  std::ostringstream insert_cql;
+  insert_cql << "INSERT INTO " << cassandra_keyspace << ".request_idempotency "
+             << "(tenant_id, idempotency_key, notification_id, created_ts) VALUES ("
+             << "'" << EscapeForCql(tenant_id) << "',"
+             << "'" << EscapeForCql(idempotency_key) << "',"
+             << "'" << EscapeForCql(notification_id) << "',"
+             << "toTimestamp(now())) IF NOT EXISTS;";
+
+  std::string lwt_output;
+  if (!RunCqlCapture(cassandra_host, cassandra_port, insert_cql.str(), lwt_output)) {
+    result.error = "failed to execute lwt claim";
+    return result;
+  }
+
+  bool applied = false;
+  if (!ParseLwtApplied(lwt_output, applied)) {
+    result.error = "failed to parse lwt claim result";
+    return result;
+  }
+
+  if (applied) {
+    result.success = true;
+    result.claimed = true;
+    result.notification_id = notification_id;
+    return result;
+  }
+
+  // Duplicate path: read the canonical notification_id for this key.
+  std::ostringstream select_cql;
+  select_cql << "SELECT notification_id FROM " << cassandra_keyspace << ".request_idempotency WHERE "
+             << "tenant_id='" << EscapeForCql(tenant_id) << "' AND "
+             << "idempotency_key='" << EscapeForCql(idempotency_key) << "';";
+
+  std::string select_output;
+  if (!RunCqlCapture(cassandra_host, cassandra_port, select_cql.str(), select_output)) {
+    result.error = "failed to fetch existing idempotency claim";
+    return result;
+  }
+
+  result.success = true;
+  result.claimed = false;
+  result.notification_id = ParseSingleColumnSelectValue(select_output).value_or("");
+  return result;
+}
+
+struct IdempotencyReleaseResult {
+  bool success = false;
+  bool released = false;
+  std::string error;
+};
+
+IdempotencyReleaseResult ReleaseIdempotencyKey(const std::string& backend,
+                                               const std::string& cassandra_host,
+                                               int cassandra_port,
+                                               const std::string& cassandra_keyspace,
+                                               const std::string& tenant_id,
+                                               const std::string& idempotency_key,
+                                               const std::string& notification_id) {
+  IdempotencyReleaseResult result{};
+  if (backend != "cassandra") {
+    result.error = "idempotency release requires cassandra backend";
+    return result;
+  }
+
+  std::ostringstream delete_cql;
+  // Only release if the claim belongs to the same notification id.
+  delete_cql << "DELETE FROM " << cassandra_keyspace << ".request_idempotency WHERE "
+             << "tenant_id='" << EscapeForCql(tenant_id) << "' AND "
+             << "idempotency_key='" << EscapeForCql(idempotency_key) << "' "
+             << "IF notification_id='" << EscapeForCql(notification_id) << "';";
+
+  std::string output;
+  if (!RunCqlCapture(cassandra_host, cassandra_port, delete_cql.str(), output)) {
+    result.error = "failed to execute release lwt";
+    return result;
+  }
+
+  bool applied = false;
+  if (!ParseLwtApplied(output, applied)) {
+    result.error = "failed to parse release lwt result";
+    return result;
+  }
+
+  result.success = true;
+  result.released = applied;
+  return result;
 }
 
 bool AppendRecordFile(const std::string& file_path, const std::string& payload) {
@@ -610,6 +852,66 @@ int main() {
           continue;
         }
       }
+    }
+
+    if (req.method == "POST" && path == "/v1/internal/idempotency/claim") {
+      const auto tenant = ExtractJsonStringField(req.body, "tenant_id");
+      const auto idempotency_key = ExtractJsonStringField(req.body, "idempotency_key");
+      const auto notification_id = ExtractJsonStringField(req.body, "notification_id");
+      if (!tenant.has_value() || tenant->empty() ||
+          !idempotency_key.has_value() || idempotency_key->empty() ||
+          !notification_id.has_value() || notification_id->empty()) {
+        WriteHttpResponse(client_fd, 400, "Bad Request",
+                          "{\"error\":\"tenant_id, idempotency_key and notification_id are required\"}");
+        close(client_fd);
+        continue;
+      }
+
+      const auto claim = ClaimIdempotencyKey(backend, cassandra_host, cassandra_port, cassandra_keyspace,
+                                             tenant.value(), idempotency_key.value(), notification_id.value());
+      if (!claim.success) {
+        WriteHttpResponse(client_fd, 500, "Internal Server Error",
+                          "{\"error\":\"" + JsonEscape(claim.error) + "\"}");
+        close(client_fd);
+        continue;
+      }
+
+      std::ostringstream body;
+      body << "{\"claimed\":" << (claim.claimed ? "true" : "false")
+           << ",\"notification_id\":\"" << JsonEscape(claim.notification_id) << "\"}";
+      WriteHttpResponse(client_fd, 200, "OK", body.str());
+      close(client_fd);
+      continue;
+    }
+
+    if (req.method == "POST" && path == "/v1/internal/idempotency/release") {
+      const auto tenant = ExtractJsonStringField(req.body, "tenant_id");
+      const auto idempotency_key = ExtractJsonStringField(req.body, "idempotency_key");
+      const auto notification_id = ExtractJsonStringField(req.body, "notification_id");
+      if (!tenant.has_value() || tenant->empty() ||
+          !idempotency_key.has_value() || idempotency_key->empty() ||
+          !notification_id.has_value() || notification_id->empty()) {
+        WriteHttpResponse(client_fd, 400, "Bad Request",
+                          "{\"error\":\"tenant_id, idempotency_key and notification_id are required\"}");
+        close(client_fd);
+        continue;
+      }
+
+      const auto released = ReleaseIdempotencyKey(backend, cassandra_host, cassandra_port,
+                                                  cassandra_keyspace, tenant.value(),
+                                                  idempotency_key.value(), notification_id.value());
+      if (!released.success) {
+        WriteHttpResponse(client_fd, 500, "Internal Server Error",
+                          "{\"error\":\"" + JsonEscape(released.error) + "\"}");
+        close(client_fd);
+        continue;
+      }
+
+      WriteHttpResponse(client_fd, 200, "OK",
+                        std::string("{\"released\":") +
+                            (released.released ? "true" : "false") + "}");
+      close(client_fd);
+      continue;
     }
 
     if (req.method != "POST" || path != "/v1/internal/store") {

@@ -207,6 +207,30 @@ std::optional<long long> ExtractJsonIntegerField(const std::string& json,
   }
 }
 
+std::optional<bool> ExtractJsonBoolField(const std::string& json,
+                                         const std::string& field) {
+  const std::string needle = "\"" + field + "\"";
+  size_t key = json.find(needle);
+  if (key == std::string::npos) {
+    return std::nullopt;
+  }
+  size_t colon = json.find(':', key + needle.size());
+  if (colon == std::string::npos) {
+    return std::nullopt;
+  }
+  size_t start = colon + 1;
+  while (start < json.size() && std::isspace(static_cast<unsigned char>(json[start]))) {
+    ++start;
+  }
+  if (json.compare(start, 4, "true") == 0) {
+    return true;
+  }
+  if (json.compare(start, 5, "false") == 0) {
+    return false;
+  }
+  return std::nullopt;
+}
+
 std::optional<std::string> ExtractBearerToken(
     const std::unordered_map<std::string, std::string>& headers) {
   auto it = headers.find("authorization");
@@ -759,6 +783,111 @@ bool HttpGet(const std::string& host, int port, const std::string& path, int& st
   const size_t body_pos = response.find("\r\n\r\n");
   response_body = (body_pos == std::string::npos) ? "" : response.substr(body_pos + 4);
   return true;
+}
+
+bool HttpPostJson(const std::string& host, int port, const std::string& path,
+                  const std::string& body, int& status_code, std::string& response_body) {
+  int fd = ConnectTcp(host, port);
+  if (fd < 0) {
+    return false;
+  }
+
+  std::ostringstream req;
+  req << "POST " << path << " HTTP/1.1\r\n";
+  req << "Host: " << host << ":" << port << "\r\n";
+  req << "Content-Type: application/json\r\n";
+  req << "Content-Length: " << body.size() << "\r\n";
+  req << "Connection: close\r\n\r\n";
+  req << body;
+  if (!SendAll(fd, req.str())) {
+    close(fd);
+    return false;
+  }
+
+  std::string response;
+  char buf[1024];
+  while (true) {
+    ssize_t n = recv(fd, buf, sizeof(buf), 0);
+    if (n <= 0) {
+      break;
+    }
+    response.append(buf, static_cast<size_t>(n));
+    if (response.size() > 2 * 1024 * 1024) {
+      break;
+    }
+  }
+  close(fd);
+
+  const size_t status_end = response.find("\r\n");
+  if (status_end == std::string::npos) {
+    return false;
+  }
+  std::istringstream status_stream(response.substr(0, status_end));
+  std::string http_version;
+  if (!(status_stream >> http_version >> status_code)) {
+    return false;
+  }
+  const size_t body_pos = response.find("\r\n\r\n");
+  response_body = (body_pos == std::string::npos) ? "" : response.substr(body_pos + 4);
+  return true;
+}
+
+struct IdempotencyClaimResult {
+  bool ok = false;
+  bool claimed = false;
+  std::string notification_id;
+};
+
+IdempotencyClaimResult ClaimIdempotency(const std::string& storage_host, int storage_port,
+                                        const std::string& tenant_id,
+                                        const std::string& idempotency_key,
+                                        const std::string& notification_id) {
+  IdempotencyClaimResult out{};
+  std::ostringstream body;
+  body << "{\"tenant_id\":\"" << JsonEscape(tenant_id) << "\","
+       << "\"idempotency_key\":\"" << JsonEscape(idempotency_key) << "\","
+       << "\"notification_id\":\"" << JsonEscape(notification_id) << "\"}";
+
+  int status = 0;
+  std::string response_body;
+  if (!HttpPostJson(storage_host, storage_port, "/v1/internal/idempotency/claim",
+                    body.str(), status, response_body)) {
+    return out;
+  }
+  if (status < 200 || status >= 300) {
+    return out;
+  }
+
+  const auto claimed = ExtractJsonBoolField(response_body, "claimed");
+  if (!claimed.has_value()) {
+    return out;
+  }
+
+  out.ok = true;
+  out.claimed = claimed.value();
+  out.notification_id = ExtractJsonStringField(response_body, "notification_id").value_or("");
+  return out;
+}
+
+bool ReleaseIdempotency(const std::string& storage_host, int storage_port,
+                        const std::string& tenant_id, const std::string& idempotency_key,
+                        const std::string& notification_id) {
+  std::ostringstream body;
+  body << "{\"tenant_id\":\"" << JsonEscape(tenant_id) << "\","
+       << "\"idempotency_key\":\"" << JsonEscape(idempotency_key) << "\","
+       << "\"notification_id\":\"" << JsonEscape(notification_id) << "\"}";
+
+  int status = 0;
+  std::string response_body;
+  if (!HttpPostJson(storage_host, storage_port, "/v1/internal/idempotency/release",
+                    body.str(), status, response_body)) {
+    return false;
+  }
+  if (status < 200 || status >= 300) {
+    return false;
+  }
+  const auto released = ExtractJsonBoolField(response_body, "released");
+  return released.value_or(false);
 }
 
 bool IsRateLimited(const std::string& tenant_id, int per_minute_limit) {
@@ -1464,6 +1593,42 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
     correlation_id = GenerateCorrelationId();
   }
 
+  std::string idempotency_key;
+  if (auto it = req.headers.find("idempotency-key"); it != req.headers.end()) {
+    idempotency_key = it->second;
+  }
+  if (idempotency_key.empty()) {
+    auto from_body = ExtractJsonStringField(req.body, "idempotency_key");
+    if (from_body.has_value() && !from_body->empty()) {
+      idempotency_key = from_body.value();
+    }
+  }
+
+  if (!idempotency_key.empty()) {
+    const auto claim =
+        ClaimIdempotency(storage_host, storage_port, tenant_id, idempotency_key, correlation_id);
+    if (!claim.ok) {
+      g_notifications_rejected_total.fetch_add(1);
+      LogJsonEvent("notification_rejected", "idempotency_claim_failed", tenant_id, correlation_id);
+      WriteHttpResponse(client_fd, 503, "Service Unavailable",
+                        "{\"error\":\"failed to validate idempotency key\"}");
+      close(client_fd);
+      return;
+    }
+    if (!claim.claimed) {
+      const std::string existing_id =
+          claim.notification_id.empty() ? correlation_id : claim.notification_id;
+      LogJsonEvent("notification_accepted", "duplicate_idempotency_key", tenant_id, existing_id);
+      std::ostringstream response;
+      response << "{\"status\":\"accepted\",\"deduplicated\":true,\"tenant_id\":\"" << tenant_id
+               << "\",\"stream\":\"" << stream_name
+               << "\",\"correlation_id\":\"" << existing_id << "\"}";
+      WriteHttpResponse(client_fd, 202, "Accepted", response.str());
+      close(client_fd);
+      return;
+    }
+  }
+
   std::unordered_map<std::string, std::string> fields = {
       {"tenant_id", tenant_id},
       {"user_id", user_id},
@@ -1474,6 +1639,13 @@ void HandleClientConnection(int client_fd, const std::string redis_host, const i
 
   std::string redis_reply;
   if (!PublishToRedisStream(redis_host, redis_port, stream_name, fields, redis_reply)) {
+    if (!idempotency_key.empty()) {
+      const bool released =
+          ReleaseIdempotency(storage_host, storage_port, tenant_id, idempotency_key, correlation_id);
+      if (!released) {
+        LogJsonEvent("notification_rejected", "idempotency_release_failed", tenant_id, correlation_id);
+      }
+    }
     g_notifications_rejected_total.fetch_add(1);
     LogJsonEvent("notification_rejected", "redis_publish_failed", tenant_id, correlation_id);
     WriteHttpResponse(client_fd, 503, "Service Unavailable",

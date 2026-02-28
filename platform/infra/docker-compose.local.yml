@@ -18,6 +18,7 @@ services:
       dockerfile: platform/Dockerfile
       args:
         SERVICE_TARGET: notification_storage
+        INSTALL_CASSANDRA_TOOLS: "true"
     container_name: mtnp-storage
     environment:
       - STORAGE_PORT=8090

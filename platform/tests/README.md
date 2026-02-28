@@ -16,6 +16,12 @@ Run smoke path:
 bash platform/tests/e2e/smoke_e2e.sh
 ```
 
+Run idempotency path:
+
+```bash
+bash platform/tests/e2e/idempotency_e2e.sh
+```
+
 Run full E2E suite:
 
 ```bash
